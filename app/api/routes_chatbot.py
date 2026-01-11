@@ -1,5 +1,5 @@
 import os
-import shutil
+import time
 from fastapi import APIRouter, HTTPException, Form, File, UploadFile
 from typing import Optional
 from app.core.config import settings
@@ -7,6 +7,8 @@ from app.schemas.chatbot import ChatRequest
 from app.services.chatbot_prompt_builder import prompt_builder
 from app.services.llm_client import llm_client
 from app.services.memory_service import memory_service
+from app.services.rag_ingestion_service import rag_ingestion_service
+from app.services.private_rag_search_service import private_rag_service
 from app.services.rag_search_service import rag_service
 
 router = APIRouter()
@@ -18,11 +20,11 @@ async def send_chat_message(
         attachFile_name: Optional[str] = Form(None, description="첨부 파일 이름"),
         attachFile_extension: Optional[str] = Form(None, description="확장자"),
         deepResearch: bool = Form(False, description="심층 리서치 사용 여부"),
-
         # 바이너리 파일 받기 (Optional)
         attachFile_bin: Optional[UploadFile] = File(None, description="실제 파일")
 ):
     try:
+
         request_data = ChatRequest(
             message=message,
             attachFile_name=attachFile_name,
@@ -42,6 +44,7 @@ async def send_chat_message(
             # attachFile_bin.filename에 사용자가 올린 파일명이 들어있음
             filename = attachFile_bin.filename
             saved_file_path = os.path.join(upload_dir, filename)
+            print(saved_file_path)
 
             # 4. 진짜로 저장 (디스크에 쓰기)
             # 대용량 파일일 수도 있으니 read/write 방식으로 안전하게
@@ -49,22 +52,44 @@ async def send_chat_message(
             with open(saved_file_path, "wb") as fp:
                 fp.write(content)
 
-        rag_context_text = None
-        if deepResearch:
-            # 사용자의 질문(message)을 가지고 검색을 나간다!
-            rag_context_text = await rag_service.search(message)
+            try:
+                print(f"📂 [Upload] Start ingesting file: {filename} for room: {invokeId}")
 
-        # 2. 기억 로딩
+                # Unstructured 파싱 -> 임베딩 -> Redis 저장까지 한 번에 수행
+                await rag_ingestion_service.ingest_file(attachFile_name, invokeId, saved_file_path)
+
+                print(f"✅ [Upload] Successfully indexed to Redis!")
+            except Exception as e:
+                print(f"⚠️ [Ingestion Failed] {e}")
+
+
+        # 2. [Deep Research] 심층 검색 (옵션이 켜졌을 때만) 임시로 만듬
+        if deepResearch:
+            global_context = await rag_service.search(message)
+            return global_context
+            #rag_context_parts.append(f"[심층 검색(Web/Global DB) 결과]:\n{global_context}")
+
+
+        doc_result = await private_rag_service.search(message, invokeId)
+        final_rag_context = (
+            f"[검색된 개인 문서 내용]:\n{doc_result}"
+            if doc_result else None
+        )
+
+
         history = await memory_service.get_history(invokeId)
 
-        # 3. 프롬프트 빌드 (검색 결과도 같이 넘겨줌!)
+
+        # 4. 프롬프트 빌더에 전달
+
         llm_payload = prompt_builder.build_openai_payload(
             request_data=request_data,
             history_override=history,
-            rag_context=rag_context_text  # [핵심] 검색 결과를 주방장에게 전달
+            rag_context=final_rag_context  # 여기에 합쳐진 지식이 들어감
         )
 
         response_json = await llm_client.chat_completions(llm_payload)
+
 
         ai_answer = response_json['choices'][0]['message']['content']
         await memory_service.add_history(invokeId, message, ai_answer)

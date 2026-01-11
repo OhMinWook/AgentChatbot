@@ -21,7 +21,7 @@ class LLMClient:
         url = f"{self.base_url}/v1/chat/completions"
 
         # timeout은 넉넉하게, 하지만 무한대는 위험함.
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=90.0) as client:
             try:
                 response = await client.post(url, json=payload, headers=self.headers)
                 response.raise_for_status()  # 4xx, 5xx 에러 시 즉시 예외 발생

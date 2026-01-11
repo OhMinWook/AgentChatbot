@@ -17,22 +17,43 @@ class RedisMemoryService:
 
     async def get_history(self, session_id: str) -> List[Dict[str, str]]:
         """
-        Redis에서 해당 세션의 대화 기록을 가져옴
+        Redis에서 대화 기록을 가져오되, 글자 수와 개수 제한을 모두 적용함
         """
-        # Redis 키 포맷: "chat:세션ID"
         key = f"chat:{session_id}"
-
-        # 저장된 JSON 문자열을 가져옴
         data = await self.redis.get(key)
 
-        if data:
-            full_history = json.loads(data)
-            # settings에 정의된 개수(예: 10)를 가져옴
-            limit = settings.MAX_HISTORY_COUNT
+        if not data:
+            return []
 
-            return full_history[-limit:]
+        full_history = json.loads(data)
 
-        return []
+        # settings에서 설정값 로드
+        char_limit = settings.MAX_HISTORY_CHARS  # 1500
+        count_limit = settings.MAX_HISTORY_COUNT  # 5
+
+        limited_history = []
+        current_chars = 0
+
+        # 1. 가장 최근 메시지부터 역순으로 순회
+        for message in reversed(full_history):
+            # 2. 개수 제한 확인 (이미 설정된 개수를 넘으면 중단)
+            if len(limited_history) >= count_limit:
+                break
+
+            content = message.get("content", "")
+            msg_len = len(content)
+
+            # 3. 글자 수 제한 확인
+            if current_chars + msg_len > char_limit:
+                # 첫 메시지가 너무 길 경우 최소 하나는 보장하거나, 바로 중단
+                if not limited_history:
+                    limited_history.append(message)
+                break
+
+            limited_history.append(message)
+            current_chars += msg_len
+        # 4. 역순으로 담았으므로 다시 시간 순서(정방향)로 뒤집어서 반환
+        return limited_history[::-1]
 
     async def add_history(self, session_id: str, user_msg: str, ai_msg: str):
         """

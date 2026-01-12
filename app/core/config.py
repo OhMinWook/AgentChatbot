@@ -2,13 +2,13 @@ from pydantic import BaseModel
 import os
 
 class Settings(BaseModel):
-    VLLM_BASE_URL: str = os.getenv("VLLM_BASE_URL", "http://198.13.252.3:21390")
+    VLLM_BASE_URL: str = os.getenv("VLLM_BASE_URL", "http://198.13.252.3:30168")
     VLLM_MODEL: str = os.getenv("VLLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B-AWQ")
 
     # 운영에서 흔히 필요한 제한값들 (MVP 기본)
     MAX_INPUT_CHARS: int = int(os.getenv("MAX_INPUT_CHARS", "20000"))
     DEFAULT_MAX_TOKENS: int = int(os.getenv("DEFAULT_MAX_TOKENS", "8192"))
-    DEFAULT_TEMPERATURE: float = float(os.getenv("DEFAULT_TEMPERATURE", "0.1"))
+    DEFAULT_TEMPERATURE: float = float(os.getenv("DEFAULT_TEMPERATURE", "0"))
 
     REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
@@ -23,5 +23,8 @@ class Settings(BaseModel):
 
     # [파일 업로드 경로] 프로젝트 루트에 'uploaded_files' 라는 폴더를 기본값으로 사용
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploaded_files")
+
+    # [STT 설정] 음성인식 서버 URL
+    STT_BASE_URL: str = os.getenv("STT_BASE_URL", "http://64.247.196.119:13850")
 
 settings = Settings()

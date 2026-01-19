@@ -1,0 +1,21 @@
+# 1. Core Framework
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings  # 환경변수 관리를 위해 권장 (선택사항)
+
+# 2. File Handling (필수 추가)
+python-multipart   # [중요] 사용자가 파일을 업로드하려면 이게 반드시 있어야 함!
+
+# 3. Networking & Database
+httpx              # Unstructured API 호출용 (이미 있음)
+redis              # Vector DB 및 캐시용 (이미 있음)
+
+# 4. LangChain Ecosystem (RAG 구현용)
+langchain
+langchain-community
+langchain-huggingface  # 임베딩 모델(BGE-M3) 로드용
+sentence-transformers  # HuggingFaceEmbeddings의 의존성
+
+# 5. Utilities
+tiktoken           # 토큰 수를 계산해서 Chunking할 때 필요할 수 있음

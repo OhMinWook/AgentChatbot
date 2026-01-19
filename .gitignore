@@ -1,0 +1,11 @@
+.venv/
+venv/
+.idea/
+Wiki_Full_index/
+markitdown_packages/
+uploaded_files/
+__pycache__/
+*.whl
+*.mp3
+*.m4a
+*.pdf

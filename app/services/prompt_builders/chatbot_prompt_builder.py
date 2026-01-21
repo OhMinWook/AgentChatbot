@@ -9,11 +9,15 @@ class ChatbotPromptBuilder:
     def __init__(self):
         # 시스템 프롬프트: AI의 페르소나 정의
         self.default_system_prompt = (
-            "너는 (주)울타리정보통신에서 만든 업무보조형 AI 비서 챗봇이야.\n"
-            "너의 주 업무는 사람들의 요청에 전문적인 어투로 예의바르게 대응하는거야.\n"
-            "정말로 확실한 정보가 아닌 이상 절대로 추측하지마 부족한 정보를 정확하게 요구해"
-            "만약 사용자가 위에 있다고 말하는 것은 과거의 기록을 의미해. 네가 알고 있는 한의 과거에서 생각해.\n"
-            "업무 관련 대화가 아닌 일상적인 대화에 너무 딱딱하게 대응할 필요는 없어\n"
+            "### 페르소나\n"
+            "당신은 '(주)울타리정보통신'에서 개발한 업무 보조형 AI 비서입니다. "
+            "사용자의 요청에 전문적이고 예의 바른 태도로 응답하십시오.\n\n"
+
+            "### 업무 지침\n"
+            "1. **사실 기반 응답:** 확실하지 않은 정보는 추측하지 말고, 부족한 정보가 있다면 사용자에게 명확히 역질문하십시오.\n"
+            "2. **업무 정보 제한:** 사용자가 업무와 관련된 구체적인 데이터를 요청할 때, 제공된 '참고 자료(Context)'가 없다면 답변을 정중히 거절하십시오. 외부 지식으로 업무 데이터를 지어내지 마십시오.\n"
+            "3. **문맥 파악:** 사용자가 '위', '이전' 등을 언급하면 제공된 대화 기록(History)을 바탕으로 답변하십시오.\n"
+            "4. **유연한 태도:** 업무 외적인 일상 대화(Small talk)에서는 지나치게 딱딱하지 않게, 자연스럽고 친절하게 반응하십시오.\n"
         )
 
     def build_openai_payload(self, request_data: ChatRequest, history_override: List[Dict[str, str]] = None, rag_context: str = None) -> Dict[str, Any]:
@@ -32,14 +36,24 @@ class ChatbotPromptBuilder:
         # 3. 현재 턴의 user 메시지 (RAG 컨텍스트 + 질문)
         if rag_context:
             user_content = (
-                "다음 [Context]를 참고하여 질문에 답변해줘.\n"
-                "답변할 때 가급적 어떤 파일에서 참고한 정보인지 언급하면서 사실에 입각해서 답변해줘.\n"
-                "문서의 참조가 필요 없는 일상적인 혹은 상식적인 내용이라면 문서를 참조하지 말고 답변해줘.\n\n"
-                f"[Context]\n{rag_context}\n\n"
-                f"[Question]\n{request_data.user_message}"
+                f"### 사용자의 질문\n{request_data.user_message}\n\n"
+                "### 지시사항\n"
+                "아래 제공된 <context> 내용을 바탕으로 사용자의 질문에 답변해 주세요.\n"
+                "1. 반드시 <context>에 포함된 사실에만 입각해서 답변하세요.\n"
+                "2. 답변의 끝에는 참고한 정보가 어떤 파일인지 출처를 명시하세요.\n\n"
+                f"<context>\n{rag_context}\n</context>\n\n"
+                f"### 다시 확인: 질문\n{request_data.user_message}"
             )
         else:
-            user_content = request_data.user_message
+            user_content = (
+                f"### 사용자의 질문\n{request_data.user_message}\n\n"
+                "### 알림\n"
+                "현재 이 질문과 관련된 참고 자료(Context)를 찾지 못했습니다.\n\n"
+                "### 지시사항\n"
+                "1. **업무 관련 질문인 경우:** 참고 자료가 없으므로 답변할 수 없다고 정중히 안내하고, 더 구체적인 정보를 요구하세요. 절대 추측해서 답변하지 마세요.\n"
+                "2. **일상적인 대화인 경우:** 페르소나에 맞춰 자연스럽게 대화하세요.\n\n"
+                f"### 다시 확인: 질문\n{request_data.user_message}"
+            )
 
         messages.append({"role": "user", "content": user_content})
 

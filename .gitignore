@@ -5,6 +5,7 @@ Wiki_Full_index/
 markitdown_packages/
 uploaded_files/
 __pycache__/
+libs
 *.whl
 *.mp3
 *.m4a

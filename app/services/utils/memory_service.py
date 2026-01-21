@@ -61,8 +61,9 @@ class RedisMemoryService:
         """
         key = f"chat:{session_id}"
 
-        # 1. 기존 기록 가져오기
-        current_history = await self.get_history(session_id)
+        # 1. 기존 기록 가져오기 (원본 전체 데이터를 가져와야 함)
+        data = await self.redis.get(key)
+        current_history = json.loads(data) if data else []
 
         # 2. 새 대화 추가
         current_history.append({"role": "user", "content": user_msg})

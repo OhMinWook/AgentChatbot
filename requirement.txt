@@ -19,3 +19,4 @@ sentence-transformers  # HuggingFaceEmbeddings의 의존성
 
 # 5. Utilities
 tiktoken           # 토큰 수를 계산해서 Chunking할 때 필요할 수 있음
+jinja2             # HWPX 문서 템플릿 처리용

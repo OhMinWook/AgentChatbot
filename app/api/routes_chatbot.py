@@ -1,6 +1,9 @@
 import os
+import json
+from typing import Optional, AsyncGenerator, List, Dict
 from fastapi import APIRouter, HTTPException, Form, File, UploadFile
-from typing import Optional
+from fastapi.responses import StreamingResponse
+
 from app.core.config import settings
 from app.schemas.chatbot import ChatRequest
 from app.services.prompt_builders.chatbot_prompt_builder import prompt_builder
@@ -12,9 +15,6 @@ from app.services.rag.rag_search_service import rag_service
 
 router = APIRouter()
 
-# 현재 처리 중인 파일 추적 (중복 업로드 방지)
-_processing_files: set = set()
-
 @router.post("/message/{invokeId}", summary="대화하기 (Multipart/Form-data)")
 async def send_chat_message(
         invokeId: str,
@@ -22,11 +22,9 @@ async def send_chat_message(
         attachFile_name: Optional[str] = Form(None, description="첨부 파일 이름"),
         attachFile_extension: Optional[str] = Form(None, description="확장자"),
         deepResearch: bool = Form(False, description="심층 리서치 사용 여부"),
-        # 바이너리 파일 받기 (Optional)
         attachFile_bin: Optional[UploadFile] = File(None, description="실제 파일")
 ):
     try:
-
         request_data = ChatRequest(
             message=message,
             attachFile_name=attachFile_name,
@@ -35,68 +33,79 @@ async def send_chat_message(
         )
 
         if attachFile_bin:
-            # 1. 저장할 기본 디렉토리 + 방 번호(invokeId)로 경로 생성
-            # 예: uploaded_files/550e84.../
             upload_dir = os.path.join(settings.UPLOAD_DIR, invokeId)
-
-            # 2. 폴더가 없으면 생성 (exist_ok=True: 이미 있어도 에러 안 냄)
             os.makedirs(upload_dir, exist_ok=True)
-
-            # 3. 파일명 결정 (보안을 위해선 UUID로 바꾸기도 하지만, 지금은 원본 유지)
-            # attachFile_bin.filename에 사용자가 올린 파일명이 들어있음
             filename = attachFile_bin.filename
             saved_file_path = os.path.join(upload_dir, filename)
-            print(saved_file_path)
-
-            # 4. 진짜로 저장 (디스크에 쓰기)
-            # 대용량 파일일 수도 있으니 read/write 방식으로 안전하게
             content = await attachFile_bin.read()
             with open(saved_file_path, "wb") as fp:
                 fp.write(content)
-
             try:
                 print(f"📂 [Upload] Start ingesting file: {filename} for room: {invokeId}")
-
-                # Unstructured 파싱 -> 임베딩 -> Redis 저장까지 한 번에 수행
-                await rag_ingestion_service.ingest_file(attachFile_name, invokeId, saved_file_path)
-
+                await rag_ingestion_service.ingest_file(attachFile_name, invokeId, saved_file_path, attachFile_extension)
                 print(f"✅ [Upload] Successfully indexed to Redis!")
             except Exception as e:
                 print(f"⚠️ [Ingestion Failed] {e}")
 
+        # [공통] 스트리밍 중 전체 답변을 누적하고, 스트림 종료 후 DB에 저장하는 생성자
+        async def stream_and_save(stream: AsyncGenerator[bytes, None], references: Optional[List[Dict]] = None):
+            full_ai_answer = ""
+            
+            # 1. 참조 문서 정보가 있다면 가장 먼저 전송 (OpenAI 호환 포맷은 아니지만 data: 라인으로 전달)
+            if references:
+                ref_payload = {
+                    "type": "references",
+                    "docs": references
+                }
+                yield f"data: {json.dumps(ref_payload, ensure_ascii=False)}\n\n".encode('utf-8')
 
-        # 2. [Deep Research] 심층 검색 (옵션이 켜졌을 때만) 임시로 만듬
+            # 2. LLM 응답 스트리밍
+            async for chunk in stream:
+                yield chunk
+                try:
+                    chunk_str = chunk.decode('utf-8').strip()
+                    if chunk_str.startswith("data:"):
+                        json_str = chunk_str[5:].strip()
+                        if json_str and json_str != "[DONE]":
+                            data = json.loads(json_str)
+                            if 'choices' in data and data['choices']:
+                                delta = data['choices'][0].get('delta', {})
+                                content_part = delta.get('content')
+                                if content_part:
+                                    full_ai_answer += content_part
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass # 파싱 오류는 무시
+            
+            # 스트림이 모두 끝나면 전체 답변을 DB에 저장
+            await memory_service.add_history(invokeId, message, full_ai_answer)
+            print(f"📝 [History Saved] invokeId: {invokeId}")
+
+        # 2. [Deep Research] 심층 검색 (옵션이 켜졌을 때)
         if deepResearch:
-            global_context = await rag_service.search(message)
-            return global_context
-            #rag_context_parts.append(f"[심층 검색(Web/Global DB) 결과]:\n{global_context}")
+            print(f"🌎 [Deep Research] invokeId: {invokeId}")
+            # rag_service.search는 이제 스트림을 반환
+            rag_stream = await rag_service.search(message)
+            return StreamingResponse(stream_and_save(rag_stream), media_type="text/event-stream")
 
-
+        # 3. [Private RAG] 개인화 검색 (일반적인 경우)
         doc_result = await private_rag_service.search(message, invokeId)
-        final_rag_context = (
-            f"[검색된 개인 문서 내용]:\n{doc_result}"
-            if doc_result else None
-        )
-
-
+        
+        # doc_result는 이제 {"context": "...", "references": [...]} 형식임
+        context_text = doc_result.get("context")
+        references = doc_result.get("references", [])
+        
+        final_rag_context = (f"[검색된 개인 문서 내용]:\n{context_text}" if context_text else None)
         history = await memory_service.get_history(invokeId)
-
-
-        # 4. 프롬프트 빌더에 전달
 
         llm_payload = prompt_builder.build_openai_payload(
             request_data=request_data,
             history_override=history,
-            rag_context=final_rag_context  # 여기에 합쳐진 지식이 들어감
+            rag_context=final_rag_context
         )
 
-        response_json = await llm_client.chat_completions(llm_payload)
-
-
-        ai_answer = response_json['choices'][0]['message']['content']
-        await memory_service.add_history(invokeId, message, ai_answer)
-
-        return response_json
+        # llm_client에서 직접 스트림을 받아 처리
+        llm_stream = await llm_client.chat_completions_stream(llm_payload)
+        return StreamingResponse(stream_and_save(llm_stream, references), media_type="text/event-stream")
 
     except Exception as e:
         print(f"Error: {e}")

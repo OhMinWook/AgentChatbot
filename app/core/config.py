@@ -2,7 +2,7 @@ from pydantic import BaseModel
 import os
 
 class Settings(BaseModel):
-    VLLM_BASE_URL: str = os.getenv("VLLM_BASE_URL", "http://198.13.252.3:36377")
+    VLLM_BASE_URL: str = os.getenv("VLLM_BASE_URL", "http://198.13.252.22:51445")
     VLLM_MODEL: str = os.getenv("VLLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B-AWQ")
 
     # 운영에서 흔히 필요한 제한값들 (MVP 기본)
@@ -28,13 +28,23 @@ class Settings(BaseModel):
     STT_BASE_URL: str = os.getenv("STT_BASE_URL", "http://64.247.196.119:13850")
 
     # [모델 서버 설정] 임베딩, Reranker 등을 위한 외부 모델 서버 URL
-    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://195.26.233.58:51833")
+    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://195.26.233.15:46807")
 
     # [RAG 설정] 임베딩 차원 및 인덱스 이름
     EMBEDDING_DIMS: int = 1024
     RAG_INDEX_NAME: str = "otinus_knowledge_index"
 
+    # [Qdrant 설정] Hybrid Search용 벡터 DB
+    QDRANT_HOST: str = os.getenv("QDRANT_HOST", "localhost")
+    QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))
+    QDRANT_COLLECTION_NAME: str = os.getenv("QDRANT_COLLECTION_NAME", "otinus_rag")
+
+    # [Hybrid Search 설정]
+    DENSE_TOP_K: int = 50  # Dense 검색 상위 개수
+    SPARSE_TOP_K: int = 50  # Sparse 검색 상위 개수
+    RERANK_TOP_K: int = 5   # Reranking 후 최종 반환 개수
+
     # [Polaris 설정] Polaris 사용 여부 (False일 경우 pdf4llm/markitdown 등 대체재 사용)
-    POLARIS_ENABLED: bool = False
+    POLARIS_ENABLED: bool = True
 
 settings = Settings()

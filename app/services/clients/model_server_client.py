@@ -1,5 +1,5 @@
 import httpx
-from typing import List
+from typing import List, Dict, Tuple
 from app.core.config import settings
 
 class ModelServerClient:
@@ -94,6 +94,82 @@ class ModelServerClient:
             raise e
         except (httpx.RequestError, KeyError) as e:
             print(f"Model Server Connection or a malformed response Error (Rerank): {e}")
+            raise e
+
+    async def get_sparse_embeddings(self, texts: List[str]) -> List[Dict[str, List]]:
+        """
+        [비동기] 텍스트 목록을 받아 sparse embedding (indices, values) 목록을 반환합니다.
+        """
+        url = f"{self.base_url}/sparse_embeddings"
+        payload = {"texts": texts}
+
+        try:
+            response = await self.async_client.post(url, json=payload, headers=self.headers)
+            response.raise_for_status()
+            return response.json()["sparse_embeddings"]
+        except httpx.HTTPStatusError as e:
+            print(f"Model Server Error (Sparse Embeddings): {e.response.text}")
+            raise e
+        except (httpx.RequestError, KeyError) as e:
+            print(f"Model Server Connection or a malformed response Error (Sparse Embeddings): {e}")
+            raise e
+
+    def get_sparse_embeddings_sync(self, texts: List[str]) -> List[Dict[str, List]]:
+        """
+        [동기] 텍스트 목록을 받아 sparse embedding (indices, values) 목록을 반환합니다.
+        """
+        url = f"{self.base_url}/sparse_embeddings"
+        payload = {"texts": texts}
+
+        try:
+            response = self.sync_client.post(url, json=payload, headers=self.headers)
+            response.raise_for_status()
+            return response.json()["sparse_embeddings"]
+        except httpx.HTTPStatusError as e:
+            print(f"Model Server Error (Sync Sparse Embeddings): {e.response.text}")
+            raise e
+        except (httpx.RequestError, KeyError) as e:
+            print(f"Model Server Connection or a malformed response Error (Sync Sparse Embeddings): {e}")
+            raise e
+
+    async def get_hybrid_embeddings(self, texts: List[str]) -> Tuple[List[List[float]], List[Dict[str, List]]]:
+        """
+        [비동기] Dense + Sparse embedding을 동시에 반환합니다.
+        Returns: (dense_embeddings, sparse_embeddings)
+        """
+        url = f"{self.base_url}/hybrid_embeddings"
+        payload = {"texts": texts}
+
+        try:
+            response = await self.async_client.post(url, json=payload, headers=self.headers)
+            response.raise_for_status()
+            data = response.json()
+            return data["dense_embeddings"], data["sparse_embeddings"]
+        except httpx.HTTPStatusError as e:
+            print(f"Model Server Error (Hybrid Embeddings): {e.response.text}")
+            raise e
+        except (httpx.RequestError, KeyError) as e:
+            print(f"Model Server Connection or a malformed response Error (Hybrid Embeddings): {e}")
+            raise e
+
+    def get_hybrid_embeddings_sync(self, texts: List[str]) -> Tuple[List[List[float]], List[Dict[str, List]]]:
+        """
+        [동기] Dense + Sparse embedding을 동시에 반환합니다.
+        Returns: (dense_embeddings, sparse_embeddings)
+        """
+        url = f"{self.base_url}/hybrid_embeddings"
+        payload = {"texts": texts}
+
+        try:
+            response = self.sync_client.post(url, json=payload, headers=self.headers)
+            response.raise_for_status()
+            data = response.json()
+            return data["dense_embeddings"], data["sparse_embeddings"]
+        except httpx.HTTPStatusError as e:
+            print(f"Model Server Error (Sync Hybrid Embeddings): {e.response.text}")
+            raise e
+        except (httpx.RequestError, KeyError) as e:
+            print(f"Model Server Connection or a malformed response Error (Sync Hybrid Embeddings): {e}")
             raise e
 
 # 싱글톤처럼 사용하기 위해 인스턴스 생성

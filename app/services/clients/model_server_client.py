@@ -172,5 +172,67 @@ class ModelServerClient:
             print(f"Model Server Connection or a malformed response Error (Sync Hybrid Embeddings): {e}")
             raise e
 
+    # ========================================
+    # ColBERT API (Jina ColBERT v2)
+    # ========================================
+
+    async def colbert_index(self, documents: List[Dict], invoke_id: str) -> int:
+        """
+        [비동기] 문서들을 ColBERT 인덱스에 추가합니다.
+        documents: [{"id": "...", "content": "...", "metadata": {...}}, ...]
+        Returns: 인덱싱된 문서 수
+        """
+        url = f"{self.base_url}/index"
+        payload = {"documents": documents, "invoke_id": invoke_id}
+
+        try:
+            response = await self.async_client.post(url, json=payload, headers=self.headers)
+            response.raise_for_status()
+            return response.json()["indexed"]
+        except httpx.HTTPStatusError as e:
+            print(f"Model Server Error (ColBERT Index): {e.response.text}")
+            raise e
+        except (httpx.RequestError, KeyError) as e:
+            print(f"Model Server Connection Error (ColBERT Index): {e}")
+            raise e
+
+    async def colbert_search(self, query: str, invoke_id: str, top_k: int = 5) -> List[Dict]:
+        """
+        [비동기] ColBERT로 문서 검색 (MaxSim).
+        Returns: [{"id": "...", "score": 0.95, "content": "...", "metadata": {...}}, ...]
+        """
+        url = f"{self.base_url}/search"
+        payload = {"query": query, "invoke_id": invoke_id, "top_k": top_k}
+
+        try:
+            response = await self.async_client.post(url, json=payload, headers=self.headers)
+            response.raise_for_status()
+            return response.json()["results"]
+        except httpx.HTTPStatusError as e:
+            print(f"Model Server Error (ColBERT Search): {e.response.text}")
+            raise e
+        except (httpx.RequestError, KeyError) as e:
+            print(f"Model Server Connection Error (ColBERT Search): {e}")
+            raise e
+
+    async def colbert_delete(self, invoke_id: str) -> int:
+        """
+        [비동기] 특정 invoke_id의 문서들을 삭제합니다.
+        Returns: 삭제된 문서 수
+        """
+        url = f"{self.base_url}/index/{invoke_id}"
+
+        try:
+            response = await self.async_client.delete(url, headers=self.headers)
+            response.raise_for_status()
+            return response.json()["deleted"]
+        except httpx.HTTPStatusError as e:
+            print(f"Model Server Error (ColBERT Delete): {e.response.text}")
+            raise e
+        except (httpx.RequestError, KeyError) as e:
+            print(f"Model Server Connection Error (ColBERT Delete): {e}")
+            raise e
+
+
 # 싱글톤처럼 사용하기 위해 인스턴스 생성
 model_server_client = ModelServerClient()

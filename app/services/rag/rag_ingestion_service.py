@@ -5,12 +5,6 @@ import os
 import re
 import uuid
 from typing import List, Dict, Any, Optional
-from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    VectorParams, SparseVectorParams, Distance,
-    PointStruct, SparseVector,
-    NamedVector, NamedSparseVector
-)
 
 # Polaris 비활성화 시 사용할 대체 라이브러리들
 try:
@@ -40,47 +34,14 @@ logger = logging.getLogger(__name__)
 
 class RagIngestionService:
     def __init__(self):
-        # Qdrant 클라이언트 초기화
-        self.qdrant_client = QdrantClient(
-            host=settings.QDRANT_HOST,
-            port=settings.QDRANT_PORT
-        )
-        self.collection_name = settings.QDRANT_COLLECTION_NAME
-
         # MarkItDown 인스턴스 재사용 (매번 생성하지 않음)
         self._markitdown = MarkItDown() if MarkItDown else None
-
-        # Collection 초기화
-        self._ensure_collection()
-
-    def _ensure_collection(self):
-        """Qdrant Collection이 없으면 생성합니다."""
-        collections = self.qdrant_client.get_collections().collections
-        collection_names = [c.name for c in collections]
-
-        if self.collection_name not in collection_names:
-            logger.info(f"Creating Qdrant collection: {self.collection_name}")
-            self.qdrant_client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config={
-                    "dense": VectorParams(
-                        size=settings.EMBEDDING_DIMS,
-                        distance=Distance.COSINE
-                    )
-                },
-                sparse_vectors_config={
-                    "sparse": SparseVectorParams()
-                }
-            )
-            logger.info(f"Collection '{self.collection_name}' created successfully.")
-        else:
-            logger.info(f"Collection '{self.collection_name}' already exists.")
 
     def _create_chunks_with_page_tracking(self, markdown_content: str, file_name: str, invoke_id: str, start_page: int = 1) -> List[Dict]:
         """
         마크다운 텍스트 내의 페이지 구분자(--- Page N ---)를 감지하여
         페이지 단위로 청크를 생성합니다.
-        Returns: List of dicts with 'content', 'source', 'invoke_id', 'page'
+        Returns: List of dicts with 'id', 'content', 'metadata'
         """
         if not markdown_content.strip():
             logger.warning("추출된 마크다운 내용이 없습니다.")
@@ -97,10 +58,12 @@ class RagIngestionService:
         if parts[0].strip():
             content_with_title = f"[문서: {file_name}]\n{parts[0].strip()}"
             chunks.append({
+                "id": str(uuid.uuid4()),
                 "content": content_with_title,
-                "source": file_name,
-                "invoke_id": invoke_id,
-                "page": current_page
+                "metadata": {
+                    "source": file_name,
+                    "page": current_page
+                }
             })
 
         # 이후 페이지들 처리
@@ -115,10 +78,12 @@ class RagIngestionService:
             if content.strip():
                 content_with_title = f"[문서: {file_name}]\n{content.strip()}"
                 chunks.append({
+                    "id": str(uuid.uuid4()),
                     "content": content_with_title,
-                    "source": file_name,
-                    "invoke_id": invoke_id,
-                    "page": current_page
+                    "metadata": {
+                        "source": file_name,
+                        "page": current_page
+                    }
                 })
 
         return chunks
@@ -144,10 +109,12 @@ class RagIngestionService:
                 if content_text.strip():
                     content_with_title = f"[문서: {display_name}]\n{content_text.strip()}"
                     chunks.append({
+                        "id": str(uuid.uuid4()),
                         "content": content_with_title,
-                        "source": display_name,
-                        "invoke_id": invoke_id,
-                        "page": real_page_num
+                        "metadata": {
+                            "source": display_name,
+                            "page": real_page_num
+                        }
                     })
         except Exception as e:
             logger.exception(f"pdf4llm 변환 중 예외 발생: {e}")
@@ -215,62 +182,27 @@ class RagIngestionService:
             if com_initialized:
                 pythoncom.CoUninitialize()
 
-    async def _store_chunks_to_qdrant(self, chunks: List[Dict]):
+    async def _store_chunks_to_colbert(self, chunks: List[Dict], invoke_id: str):
         """
-        청크 목록을 Qdrant에 저장합니다.
-        각 청크에 대해 dense + sparse embedding을 생성하여 저장합니다.
+        청크 목록을 ColBERT 인덱스에 저장합니다.
+        모델 서버의 /index API를 호출합니다.
         """
         if not chunks:
             return
 
-        batch_size = 50  # 임베딩 API 호출 배치 크기
+        batch_size = 50
         total_chunks = len(chunks)
-        logger.info(f"[Ingestion] Qdrant에 저장할 총 청크 수: {total_chunks}")
+        logger.info(f"[Ingestion] ColBERT에 저장할 총 청크 수: {total_chunks}")
 
         for i in range(0, total_chunks, batch_size):
             batch = chunks[i:i + batch_size]
-            texts = [chunk["content"] for chunk in batch]
 
-            # Dense + Sparse embedding 동시 획득
-            dense_embeddings, sparse_embeddings = await model_server_client.get_hybrid_embeddings(texts)
-
-            # Qdrant Point 생성
-            points = []
-            for j, chunk in enumerate(batch):
-                point_id = str(uuid.uuid4())
-
-                # Sparse vector 변환
-                sparse_data = sparse_embeddings[j]
-                sparse_vector = SparseVector(
-                    indices=sparse_data["indices"],
-                    values=sparse_data["values"]
-                )
-
-                point = PointStruct(
-                    id=point_id,
-                    vector={
-                        "dense": dense_embeddings[j],
-                        "sparse": sparse_vector
-                    },
-                    payload={
-                        "content": chunk["content"],
-                        "source": chunk["source"],
-                        "invoke_id": chunk["invoke_id"],
-                        "page": chunk["page"]
-                    }
-                )
-                points.append(point)
-
-            # Qdrant에 upsert
-            self.qdrant_client.upsert(
-                collection_name=self.collection_name,
-                points=points
-            )
+            indexed = await model_server_client.colbert_index(batch, invoke_id)
             logger.info(f"[Ingestion] 진행률: {min(i + batch_size, total_chunks)} / {total_chunks} 청크 저장 완료.")
 
     async def ingest_file(self, file_name: str, invoke_id: str, file_path: str, file_extension: Optional[str] = None):
         """
-        파일을 처리하고, 결과를 Qdrant에 저장합니다.
+        파일을 처리하고, 결과를 ColBERT 인덱스에 저장합니다.
         설정에 따라 Polaris 또는 대체 라이브러리(pdf4llm, MarkItDown, win32com)를 사용합니다.
         """
         logger.info(f"[Ingestion] 파일 처리 시작: {file_name} (Room: {invoke_id})")
@@ -360,8 +292,8 @@ class RagIngestionService:
             logger.warning("[Ingestion] 처리 후 생성된 청크(chunk)가 없습니다.")
             return
 
-        # Qdrant에 저장
-        await self._store_chunks_to_qdrant(chunks)
+        # ColBERT 인덱스에 저장
+        await self._store_chunks_to_colbert(chunks, invoke_id)
         logger.info(f"[Ingestion] {file_name}에 대한 모든 {len(chunks)}개 청크 저장 성공 (Room: {invoke_id})")
 
 

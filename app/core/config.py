@@ -39,10 +39,13 @@ class Settings(BaseModel):
     QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))
     QDRANT_COLLECTION_NAME: str = os.getenv("QDRANT_COLLECTION_NAME", "otinus_rag")
 
-    # [Hybrid Search 설정]
-    DENSE_TOP_K: int = 50  # Dense 검색 상위 개수
-    SPARSE_TOP_K: int = 50  # Sparse 검색 상위 개수
-    RERANK_TOP_K: int = 5   # Reranking 후 최종 반환 개수
+    # [Hybrid Search 설정] (Qdrant 브랜치용 - 현재 미사용)
+    DENSE_TOP_K: int = 50
+    SPARSE_TOP_K: int = 50
+    RERANK_TOP_K: int = 5
+
+    # [ColBERT 설정] Jina ColBERT v2
+    COLBERT_TOP_K: int = 5  # ColBERT 검색 상위 개수
 
     # [Polaris 설정] Polaris 사용 여부 (False일 경우 pdf4llm/markitdown 등 대체재 사용)
     POLARIS_ENABLED: bool = True

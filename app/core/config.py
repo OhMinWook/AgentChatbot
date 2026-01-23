@@ -50,9 +50,6 @@ class Settings(BaseModel):
     # [Polaris 설정] Polaris 사용 여부 (False일 경우 pdf4llm/markitdown 등 대체재 사용)
     POLARIS_ENABLED: bool = True
 
-    # [LangGraph Agent 설정]
-    AGENT_ENABLED: bool = True  # Agentic RAG 활성화 여부
-
     # [Parent-Child Chunking 설정]
     PARENT_MIN_SIZE: int = 2000   # Parent 청크 최소 크기 (자)
     PARENT_MAX_SIZE: int = 10000  # Parent 청크 최대 크기 (자)

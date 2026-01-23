@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 # Polaris 비활성화 시 사용할 대체 라이브러리들
 try:
@@ -28,6 +28,7 @@ except ImportError:
 from app.core.config import settings
 from app.services.clients.model_server_client import model_server_client
 from app.services.clients.polaris_client import polaris_converter, PolarisJsonParser
+from app.services.rag.parent_chunk_store import parent_chunk_store
 
 logger = logging.getLogger(__name__)
 
@@ -37,88 +38,269 @@ class RagIngestionService:
         # MarkItDown 인스턴스 재사용 (매번 생성하지 않음)
         self._markitdown = MarkItDown() if MarkItDown else None
 
-    def _create_chunks_with_page_tracking(self, markdown_content: str, file_name: str, invoke_id: str, start_page: int = 1) -> List[Dict]:
+    def _create_parent_child_chunks(
+        self,
+        markdown_content: str,
+        file_name: str,
+        invoke_id: str
+    ) -> Tuple[List[Dict], List[Dict]]:
         """
-        마크다운 텍스트 내의 페이지 구분자(--- Page N ---)를 감지하여
-        페이지 단위로 청크를 생성합니다.
+        Parent-Child 청킹 전략으로 청크를 생성합니다.
+
+        Parent 청크: 큰 컨텍스트 (LLM 답변 생성용) - Redis 저장
+        Child 청크: 작은 청크 (ColBERT 검색용) - ColBERT 인덱싱
+
+        Args:
+            markdown_content: 마크다운 텍스트
+            file_name: 파일명
+            invoke_id: 사용자/세션 ID
+
+        Returns:
+            (parent_chunks, child_chunks) 튜플
+        """
+        if not markdown_content.strip():
+            return [], []
+
+        # 설정값 로드
+        parent_min = settings.PARENT_MIN_SIZE
+        parent_max = settings.PARENT_MAX_SIZE
+        child_size = settings.CHILD_CHUNK_SIZE
+        child_overlap = settings.CHILD_CHUNK_OVERLAP
+
+        # 페이지 구분자로 페이지별 텍스트와 페이지 번호 매핑 생성
+        page_pattern = re.compile(r'\n--- Page (\d+) ---\n')
+        parts = page_pattern.split(markdown_content)
+
+        # 페이지별 텍스트 수집
+        page_texts = []
+        current_page = 1
+
+        if parts[0].strip():
+            page_texts.append((current_page, parts[0].strip()))
+
+        for i in range(1, len(parts), 2):
+            try:
+                page_num = int(parts[i])
+                content = parts[i + 1].strip() if i + 1 < len(parts) else ""
+                if content:
+                    page_texts.append((page_num, content))
+            except (IndexError, ValueError):
+                continue
+
+        if not page_texts:
+            return [], []
+
+        # === Parent 청크 생성 ===
+        # 페이지들을 parent_min ~ parent_max 범위로 그룹화
+        parent_chunks = []
+        current_parent_text = ""
+        current_parent_pages = []
+
+        for page_num, page_text in page_texts:
+            test_text = current_parent_text + "\n\n" + page_text if current_parent_text else page_text
+
+            if len(test_text) > parent_max and current_parent_text:
+                # 현재 Parent 청크 저장
+                parent_id = str(uuid.uuid4())
+                start_page = current_parent_pages[0] if current_parent_pages else page_num
+                end_page = current_parent_pages[-1] if current_parent_pages else page_num
+
+                parent_chunks.append({
+                    "parent_id": parent_id,
+                    "content": f"[문서: {file_name}]\n{current_parent_text.strip()}",
+                    "metadata": {
+                        "source": file_name,
+                        "page_start": start_page,
+                        "page_end": end_page
+                    }
+                })
+
+                # 새 Parent 시작
+                current_parent_text = page_text
+                current_parent_pages = [page_num]
+            else:
+                current_parent_text = test_text
+                current_parent_pages.append(page_num)
+
+        # 마지막 Parent 청크
+        if current_parent_text.strip():
+            parent_id = str(uuid.uuid4())
+            start_page = current_parent_pages[0] if current_parent_pages else 1
+            end_page = current_parent_pages[-1] if current_parent_pages else 1
+
+            parent_chunks.append({
+                "parent_id": parent_id,
+                "content": f"[문서: {file_name}]\n{current_parent_text.strip()}",
+                "metadata": {
+                    "source": file_name,
+                    "page_start": start_page,
+                    "page_end": end_page
+                }
+            })
+
+        # === Child 청크 생성 ===
+        # 각 Parent를 작은 Child 청크로 분할
+        child_chunks = []
+
+        for parent in parent_chunks:
+            parent_id = parent["parent_id"]
+            parent_content = parent["content"]
+            parent_meta = parent["metadata"]
+
+            # [문서: ...] 접두사 제거 후 분할
+            clean_content = parent_content
+            if parent_content.startswith("[문서:"):
+                newline_idx = parent_content.find("\n")
+                if newline_idx != -1:
+                    clean_content = parent_content[newline_idx + 1:].strip()
+
+            # 고정 크기로 분할
+            start = 0
+            text_length = len(clean_content)
+
+            while start < text_length:
+                end = start + child_size
+                chunk_text = clean_content[start:end]
+
+                # 단어 중간에서 자르지 않도록 조정
+                if end < text_length:
+                    last_space = chunk_text.rfind(' ')
+                    if last_space > child_size * 0.5:
+                        chunk_text = chunk_text[:last_space]
+                        end = start + last_space
+
+                if chunk_text.strip():
+                    content_with_title = f"[문서: {file_name}]\n{chunk_text.strip()}"
+                    child_chunks.append({
+                        "id": str(uuid.uuid4()),
+                        "content": content_with_title,
+                        "metadata": {
+                            "source": file_name,
+                            "page": parent_meta.get("page_start", 1),
+                            "parent_id": parent_id  # Parent 연결
+                        }
+                    })
+
+                start = end - child_overlap if end < text_length else text_length
+
+        logger.info(
+            f"[Parent-Child Chunking] {file_name}: "
+            f"Parent {len(parent_chunks)}개, Child {len(child_chunks)}개 생성"
+        )
+
+        return parent_chunks, child_chunks
+
+    def _create_chunks_with_splitting(self, markdown_content: str, file_name: str, invoke_id: str, chunk_size: int = 800, chunk_overlap: int = 100) -> List[Dict]:
+        """
+        마크다운 텍스트를 고정 크기로 분할하여 청크를 생성합니다.
+        페이지 정보가 있으면 메타데이터에 포함합니다.
+
+        Args:
+            chunk_size: 청크 크기 (기본 800자)
+            chunk_overlap: 청크 간 겹침 (기본 100자)
         Returns: List of dicts with 'id', 'content', 'metadata'
         """
         if not markdown_content.strip():
             logger.warning("추출된 마크다운 내용이 없습니다.")
             return []
 
-        # 페이지 구분자로 텍스트 분할
+        # 페이지 구분자로 페이지별 텍스트와 페이지 번호 매핑 생성
         page_pattern = re.compile(r'\n--- Page (\d+) ---\n')
         parts = page_pattern.split(markdown_content)
 
-        chunks = []
+        # 페이지별 텍스트 수집 (페이지 번호 -> 텍스트)
+        page_texts = []
+        current_page = 1
 
-        # 첫 번째 파트 처리 (구분자 이전 내용)
-        current_page = start_page
         if parts[0].strip():
-            content_with_title = f"[문서: {file_name}]\n{parts[0].strip()}"
-            chunks.append({
-                "id": str(uuid.uuid4()),
-                "content": content_with_title,
-                "metadata": {
-                    "source": file_name,
-                    "page": current_page
-                }
-            })
+            page_texts.append((current_page, parts[0].strip()))
 
-        # 이후 페이지들 처리
         for i in range(1, len(parts), 2):
             try:
-                page_num_str = parts[i]
-                content = parts[i+1]
-                current_page = int(page_num_str)
+                page_num = int(parts[i])
+                content = parts[i + 1].strip() if i + 1 < len(parts) else ""
+                if content:
+                    page_texts.append((page_num, content))
             except (IndexError, ValueError):
                 continue
 
-            if content.strip():
-                content_with_title = f"[문서: {file_name}]\n{content.strip()}"
+        # 전체 텍스트 합치기 (페이지 구분 없이)
+        full_text = "\n\n".join([text for _, text in page_texts])
+
+        if not full_text.strip():
+            return []
+
+        # 고정 크기로 청크 분할
+        chunks = []
+        start = 0
+        text_length = len(full_text)
+
+        while start < text_length:
+            end = start + chunk_size
+            chunk_text = full_text[start:end]
+
+            # 단어 중간에서 자르지 않도록 조정 (마지막 청크가 아닌 경우)
+            if end < text_length:
+                # 마지막 공백 위치 찾기
+                last_space = chunk_text.rfind(' ')
+                if last_space > chunk_size * 0.5:  # 청크의 50% 이상이면 그 위치에서 자름
+                    chunk_text = chunk_text[:last_space]
+                    end = start + last_space
+
+            if chunk_text.strip():
+                # 해당 청크가 어느 페이지에 속하는지 추정
+                chunk_start_pos = start
+                estimated_page = 1
+                cumulative_length = 0
+                for page_num, page_text in page_texts:
+                    cumulative_length += len(page_text) + 2  # +2 for "\n\n"
+                    if chunk_start_pos < cumulative_length:
+                        estimated_page = page_num
+                        break
+
+                content_with_title = f"[문서: {file_name}]\n{chunk_text.strip()}"
                 chunks.append({
                     "id": str(uuid.uuid4()),
                     "content": content_with_title,
                     "metadata": {
                         "source": file_name,
-                        "page": current_page
+                        "page": estimated_page
                     }
                 })
 
+            # 다음 청크 시작 위치 (overlap 적용)
+            start = end - chunk_overlap if end < text_length else text_length
+
+        logger.info(f"[Chunking] {file_name}: {len(chunks)}개 청크 생성 (크기: {chunk_size}, 겹침: {chunk_overlap})")
         return chunks
 
     def _process_polaris_json(self, polaris_data: Dict[str, Any], file_name: str, invoke_id: str) -> List[Dict]:
         """Polaris에서 추출한 JSON 데이터를 청크 목록으로 변환합니다."""
         parser = PolarisJsonParser(polaris_data)
         markdown_content = parser.parse_to_markdown()
-        return self._create_chunks_with_page_tracking(markdown_content, file_name, invoke_id)
+        return self._create_chunks_with_splitting(markdown_content, file_name, invoke_id)
 
     def _process_pdf_with_pdf4llm(self, pdf_path: str, display_name: str, invoke_id: str) -> List[Dict]:
-        """pdf4llm을 사용하여 PDF 파일을 페이지 단위로 청크 목록으로 변환합니다."""
+        """pdf4llm을 사용하여 PDF 파일을 청크 목록으로 변환합니다."""
         if pdf4llm is None:
             logger.error("pdf4llm 라이브러리가 설치되지 않았습니다.")
             return []
 
-        chunks = []
         try:
+            # 페이지별로 추출 후 페이지 구분자와 함께 합침
             pages_data = pdf4llm.to_markdown(pdf_path, page_chunks=True)
+            markdown_parts = []
             for page_idx, page_data in enumerate(pages_data):
                 real_page_num = page_idx + 1
                 content_text = page_data if isinstance(page_data, str) else page_data.get('text', '')
                 if content_text.strip():
-                    content_with_title = f"[문서: {display_name}]\n{content_text.strip()}"
-                    chunks.append({
-                        "id": str(uuid.uuid4()),
-                        "content": content_with_title,
-                        "metadata": {
-                            "source": display_name,
-                            "page": real_page_num
-                        }
-                    })
+                    markdown_parts.append(f"\n--- Page {real_page_num} ---\n{content_text.strip()}")
+
+            full_markdown = "\n".join(markdown_parts)
+            return self._create_chunks_with_splitting(full_markdown, display_name, invoke_id)
         except Exception as e:
             logger.exception(f"pdf4llm 변환 중 예외 발생: {e}")
-        return chunks
+            return []
 
     def _convert_hwp_to_pdf_with_win32com(self, input_path: str, output_dir: str) -> Optional[str]:
         """win32com을 사용하여 한글(HWP) 파일을 PDF로 변환합니다."""
@@ -281,7 +463,7 @@ class RagIngestionService:
                 try:
                     result = await asyncio.to_thread(self._markitdown.convert, file_path)
                     if result and result.text_content:
-                        chunks = self._create_chunks_with_page_tracking(result.text_content, display_name, invoke_id)
+                        chunks = self._create_chunks_with_splitting(result.text_content, display_name, invoke_id)
                     else:
                         logger.warning("MarkItDown 변환 결과가 비어있습니다.")
                 except Exception as e:
@@ -292,9 +474,33 @@ class RagIngestionService:
             logger.warning("[Ingestion] 처리 후 생성된 청크(chunk)가 없습니다.")
             return
 
-        # ColBERT 인덱스에 저장
-        await self._store_chunks_to_colbert(chunks, invoke_id)
-        logger.info(f"[Ingestion] {file_name}에 대한 모든 {len(chunks)}개 청크 저장 성공 (Room: {invoke_id})")
+        # AGENT_ENABLED일 때 Parent-Child 청킹 사용
+        if settings.AGENT_ENABLED:
+            # 기존 청크를 마크다운으로 재조합하여 Parent-Child 분할
+            # (이미 _process_polaris_json 등에서 청크가 생성된 경우)
+            combined_markdown = "\n\n".join([c.get("content", "") for c in chunks])
+            parent_chunks, child_chunks = self._create_parent_child_chunks(
+                combined_markdown, display_name, invoke_id
+            )
+
+            if parent_chunks:
+                # Parent 청크를 Redis에 저장
+                await parent_chunk_store.save_batch(invoke_id, parent_chunks)
+                logger.info(f"[Ingestion] Parent {len(parent_chunks)}개 Redis 저장 완료")
+
+            if child_chunks:
+                # Child 청크를 ColBERT에 인덱싱
+                await self._store_chunks_to_colbert(child_chunks, invoke_id)
+                logger.info(f"[Ingestion] Child {len(child_chunks)}개 ColBERT 저장 완료")
+
+            logger.info(
+                f"[Ingestion] {file_name} Parent-Child 청킹 완료 "
+                f"(Parent: {len(parent_chunks)}, Child: {len(child_chunks)}, Room: {invoke_id})"
+            )
+        else:
+            # 기존 방식: 단순 청킹 후 ColBERT 저장
+            await self._store_chunks_to_colbert(chunks, invoke_id)
+            logger.info(f"[Ingestion] {file_name}에 대한 모든 {len(chunks)}개 청크 저장 성공 (Room: {invoke_id})")
 
 
 # 싱글톤 인스턴스

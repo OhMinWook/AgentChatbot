@@ -58,6 +58,11 @@ class PrivateRagSearchService:
             seen_contents: Set[str] = set()
 
             for doc in results:
+                # 점수가 17점 미만이면 사용하지 않음
+                score = doc.get("score", 0)
+                if score < 17.0:
+                    continue
+
                 content = doc.get("content", "").strip()
 
                 if content in seen_contents:

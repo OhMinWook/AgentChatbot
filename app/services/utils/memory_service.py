@@ -36,6 +36,10 @@ class RedisMemoryService:
 
         # 1. 가장 최근 메시지부터 역순으로 순회
         for message in reversed(full_history):
+            # [임시] assistant 응답 비활성화 - user 메시지만 포함
+            if message.get("role") == "assistant":
+                continue
+
             # 2. 개수 제한 확인 (이미 설정된 개수를 넘으면 중단)
             if len(limited_history) >= count_limit:
                 break

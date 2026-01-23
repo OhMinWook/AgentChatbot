@@ -39,7 +39,8 @@ class ChatbotPromptBuilder:
 
                 "### 참고 자료\n"
                 "다음은 사내 문서에서 추출한 텍스트입니다. 각 문서는 <document> 태그로 구분되어 있으며, source(파일명)와 page(페이지 번호) 속성을 포함합니다.\n"
-                "표나 서식이 일부 깨져 있을 수 있습니다.\n\n"
+                "표나 서식이 일부 깨져 있을 수 있습니다.\n"
+                "또한 제공된 <documents>는 문서의 전체가 아닌 일부임으로 정보의 누락이 있을 수 있습니다.\n\n"
                 f"{rag_context}\n\n"
 
                 "### 지시사항(Instructions)\n"

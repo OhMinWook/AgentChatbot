@@ -2,7 +2,7 @@ from pydantic import BaseModel
 import os
 
 class Settings(BaseModel):
-    VLLM_BASE_URL: str = os.getenv("VLLM_BASE_URL", "http://198.13.252.22:51445")
+    VLLM_BASE_URL: str = os.getenv("VLLM_BASE_URL", "http://198.13.252.3:53242")
     VLLM_MODEL: str = os.getenv("VLLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B-AWQ")
 
     # 운영에서 흔히 필요한 제한값들 (MVP 기본)
@@ -28,7 +28,7 @@ class Settings(BaseModel):
     STT_BASE_URL: str = os.getenv("STT_BASE_URL", "http://64.247.196.119:13850")
 
     # [모델 서버 설정] 임베딩, Reranker 등을 위한 외부 모델 서버 URL
-    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://195.26.233.15:46807")
+    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://195.26.233.58:46909")
 
     # [RAG 설정] 임베딩 차원 및 인덱스 이름
     EMBEDDING_DIMS: int = 1024
@@ -45,9 +45,18 @@ class Settings(BaseModel):
     RERANK_TOP_K: int = 5
 
     # [ColBERT 설정] Jina ColBERT v2
-    COLBERT_TOP_K: int = 5  # ColBERT 검색 상위 개수
+    COLBERT_TOP_K: int = 6  # ColBERT 검색 상위 개수
 
     # [Polaris 설정] Polaris 사용 여부 (False일 경우 pdf4llm/markitdown 등 대체재 사용)
     POLARIS_ENABLED: bool = True
+
+    # [LangGraph Agent 설정]
+    AGENT_ENABLED: bool = True  # Agentic RAG 활성화 여부
+
+    # [Parent-Child Chunking 설정]
+    PARENT_MIN_SIZE: int = 2000   # Parent 청크 최소 크기 (자)
+    PARENT_MAX_SIZE: int = 10000  # Parent 청크 최대 크기 (자)
+    CHILD_CHUNK_SIZE: int = 500   # Child 청크 크기 (ColBERT 검색용)
+    CHILD_CHUNK_OVERLAP: int = 100  # Child 청크 간 겹침
 
 settings = Settings()

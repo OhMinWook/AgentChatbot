@@ -474,33 +474,24 @@ class RagIngestionService:
             logger.warning("[Ingestion] 처리 후 생성된 청크(chunk)가 없습니다.")
             return
 
-        # AGENT_ENABLED일 때 Parent-Child 청킹 사용
-        if settings.AGENT_ENABLED:
-            # 기존 청크를 마크다운으로 재조합하여 Parent-Child 분할
-            # (이미 _process_polaris_json 등에서 청크가 생성된 경우)
-            combined_markdown = "\n\n".join([c.get("content", "") for c in chunks])
-            parent_chunks, child_chunks = self._create_parent_child_chunks(
-                combined_markdown, display_name, invoke_id
-            )
+        # Parent-Child 청킹 후 저장
+        combined_markdown = "\n\n".join([c.get("content", "") for c in chunks])
+        parent_chunks, child_chunks = self._create_parent_child_chunks(
+            combined_markdown, display_name, invoke_id
+        )
 
-            if parent_chunks:
-                # Parent 청크를 Redis에 저장
-                await parent_chunk_store.save_batch(invoke_id, parent_chunks)
-                logger.info(f"[Ingestion] Parent {len(parent_chunks)}개 Redis 저장 완료")
+        if parent_chunks:
+            await parent_chunk_store.save_batch(invoke_id, parent_chunks)
+            logger.info(f"[Ingestion] Parent {len(parent_chunks)}개 Redis 저장 완료")
 
-            if child_chunks:
-                # Child 청크를 ColBERT에 인덱싱
-                await self._store_chunks_to_colbert(child_chunks, invoke_id)
-                logger.info(f"[Ingestion] Child {len(child_chunks)}개 ColBERT 저장 완료")
+        if child_chunks:
+            await self._store_chunks_to_colbert(child_chunks, invoke_id)
+            logger.info(f"[Ingestion] Child {len(child_chunks)}개 ColBERT 저장 완료")
 
-            logger.info(
-                f"[Ingestion] {file_name} Parent-Child 청킹 완료 "
-                f"(Parent: {len(parent_chunks)}, Child: {len(child_chunks)}, Room: {invoke_id})"
-            )
-        else:
-            # 기존 방식: 단순 청킹 후 ColBERT 저장
-            await self._store_chunks_to_colbert(chunks, invoke_id)
-            logger.info(f"[Ingestion] {file_name}에 대한 모든 {len(chunks)}개 청크 저장 성공 (Room: {invoke_id})")
+        logger.info(
+            f"[Ingestion] {file_name} Parent-Child 청킹 완료 "
+            f"(Parent: {len(parent_chunks)}, Child: {len(child_chunks)}, Room: {invoke_id})"
+        )
 
 
 # 싱글톤 인스턴스

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>Agentic RAG 테스트</title>
+    <style>
+        body { font-family: 'Malgun Gothic', sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
+        .section { margin-bottom: 30px; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input[type="text"], textarea { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { padding: 12px 24px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; margin-right: 10px; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #ccc; }
+        #log { background: #1e1e1e; color: #d4d4d4; padding: 20px; border-radius: 8px; height: 400px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; white-space: pre-wrap; }
+        .event-progress { color: #569cd6; }
+        .event-clarification { color: #ce9178; font-weight: bold; }
+        .event-references { color: #b5cea8; }
+        .event-answer { color: #4ec9b0; }
+        .event-done { color: #608b4e; }
+        .event-error { color: #f44747; }
+        .continue-section { display: none; background: #fff3cd; padding: 15px; border-radius: 8px; margin-top: 15px; }
+        .continue-section.active { display: block; }
+    </style>
+</head>
+<body>
+    <h1>Agentic RAG API 테스트</h1>
+
+    <div class="section">
+        <label>Server URL</label>
+        <input type="text" id="serverUrl" value="http://localhost:8000">
+
+        <label>Invoke ID (대화방 ID)</label>
+        <input type="text" id="invokeId" value="test-room-001">
+
+        <label>Message</label>
+        <textarea id="message" rows="3" placeholder="질문을 입력하세요...">2024년 매출이 얼마야?</textarea>
+
+        <label>File (선택)</label>
+        <input type="file" id="fileInput">
+
+        <br>
+        <button onclick="sendMessage()">전송</button>
+        <button onclick="clearLog()">로그 지우기</button>
+    </div>
+
+    <div class="continue-section" id="continueSection">
+        <strong>명확화 요청이 왔습니다!</strong>
+        <p id="clarificationMessage"></p>
+        <input type="text" id="continueResponse" placeholder="응답을 입력하세요...">
+        <button onclick="sendContinue()">계속하기</button>
+    </div>
+
+    <div class="section">
+        <h3>Response Log</h3>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        let currentThreadId = null;
+
+        function log(message, eventType = '') {
+            const logDiv = document.getElementById('log');
+            const className = eventType ? `event-${eventType}` : '';
+            const timestamp = new Date().toLocaleTimeString();
+            logDiv.innerHTML += `<span class="${className}">[${timestamp}] ${message}</span>\n`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+            document.getElementById('continueSection').classList.remove('active');
+            currentThreadId = null;
+        }
+
+        async function sendMessage() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            const invokeId = document.getElementById('invokeId').value;
+            const message = document.getElementById('message').value;
+            const fileInput = document.getElementById('fileInput');
+
+            const formData = new FormData();
+            formData.append('message', message);
+
+            if (fileInput.files.length > 0) {
+                const file = fileInput.files[0];
+                const nameParts = file.name.split('.');
+                const ext = nameParts.pop();
+                const name = nameParts.join('.');
+                formData.append('attachFile_name', name);
+                formData.append('attachFile_extension', ext);
+                formData.append('attachFile_bin', file);
+                log(`파일 첨부: ${file.name}`);
+            }
+
+            log(`요청: POST /message/${invokeId}`);
+            log(`메시지: ${message}`);
+            log('---');
+
+            try {
+                const response = await fetch(`${serverUrl}/message/${invokeId}`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                await handleSSEResponse(response);
+            } catch (error) {
+                log(`네트워크 오류: ${error.message}`, 'error');
+            }
+        }
+
+        async function sendContinue() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            const invokeId = document.getElementById('invokeId').value;
+            const response = document.getElementById('continueResponse').value;
+
+            if (!currentThreadId) {
+                log('thread_id가 없습니다.', 'error');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('thread_id', currentThreadId);
+            formData.append('response', response);
+
+            log(`요청: POST /message/${invokeId}/continue`);
+            log(`thread_id: ${currentThreadId}`);
+            log(`응답: ${response}`);
+            log('---');
+
+            document.getElementById('continueSection').classList.remove('active');
+
+            try {
+                const res = await fetch(`${serverUrl}/message/${invokeId}/continue`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                await handleSSEResponse(res);
+            } catch (error) {
+                log(`네트워크 오류: ${error.message}`, 'error');
+            }
+        }
+
+        async function handleSSEResponse(response) {
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    log('--- 스트림 종료 ---');
+                    break;
+                }
+
+                const chunk = decoder.decode(value);
+                const lines = chunk.split('\n');
+
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const data = JSON.parse(line.slice(6));
+                            handleEvent(data);
+                        } catch (e) {
+                            log(`파싱 오류: ${line}`, 'error');
+                        }
+                    }
+                }
+            }
+        }
+
+        function handleEvent(data) {
+            switch (data.type) {
+                case 'progress':
+                    log(`[progress] ${data.step}`, 'progress');
+                    break;
+
+                case 'clarification_needed':
+                    log(`[clarification_needed]`, 'clarification');
+                    log(`  message: ${data.message}`, 'clarification');
+                    log(`  thread_id: ${data.thread_id}`, 'clarification');
+                    currentThreadId = data.thread_id;
+                    document.getElementById('clarificationMessage').textContent = data.message;
+                    document.getElementById('continueSection').classList.add('active');
+                    document.getElementById('continueResponse').focus();
+                    break;
+
+                case 'references':
+                    log(`[references]`, 'references');
+                    data.docs.forEach(doc => {
+                        log(`  - ${doc.source} (page ${doc.page})`, 'references');
+                    });
+                    break;
+
+                case 'answer':
+                    log(`[answer]`, 'answer');
+                    log(data.content, 'answer');
+                    break;
+
+                case 'done':
+                    log(`[done] 완료`, 'done');
+                    break;
+
+                case 'error':
+                    log(`[error] ${data.message}`, 'error');
+                    break;
+
+                default:
+                    log(`[unknown] ${JSON.stringify(data)}`);
+            }
+        }
+    </script>
+</body>
+</html>

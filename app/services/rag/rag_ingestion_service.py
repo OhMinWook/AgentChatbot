@@ -3,7 +3,7 @@ import tempfile
 import logging
 import os
 import re
-import uuid
+import hashlib
 from typing import List, Dict, Any, Optional, Tuple
 
 # Polaris 비활성화 시 사용할 대체 라이브러리들
@@ -28,16 +28,128 @@ except ImportError:
 from app.core.config import settings
 from app.services.clients.model_server_client import model_server_client
 from app.services.clients.polaris_client import polaris_converter, PolarisJsonParser
-from app.services.rag.parent_chunk_store import parent_chunk_store
+from app.services.rag.local_index_service import local_index_service
+from app.services.rag.lightrag_service import lightrag_service
 
 logger = logging.getLogger(__name__)
+
+# 청크 설정 (512 토큰 ≈ 1500자 한국어 기준)
+CHUNK_SIZE = 1500
+CHUNK_OVERLAP = 200
 
 
 class RagIngestionService:
     def __init__(self):
-        # MarkItDown 인스턴스 재사용 (매번 생성하지 않음)
         self._markitdown = MarkItDown() if MarkItDown else None
 
+    async def _create_chunks_with_keywords(
+        self,
+        markdown_content: str,
+        file_name: str
+    ) -> List[Dict]:
+        """
+        마크다운을 512토큰 청크로 분할하고 키워드를 추출합니다.
+
+        Returns:
+            [{"id": "...", "content": "[문서:...][키워드:...]\n본문", "metadata": {...}}, ...]
+        """
+        if not markdown_content.strip():
+            return []
+
+        # 1. 페이지별 텍스트 파싱
+        page_pattern = re.compile(r'\n--- Page (\d+) ---\n')
+        parts = page_pattern.split(markdown_content)
+
+        page_texts = []  # [(page_num, text), ...]
+        if parts[0].strip():
+            page_texts.append((1, parts[0].strip()))
+
+        for i in range(1, len(parts), 2):
+            try:
+                page_num = int(parts[i])
+                content = parts[i + 1].strip() if i + 1 < len(parts) else ""
+                if content:
+                    page_texts.append((page_num, content))
+            except (IndexError, ValueError):
+                continue
+
+        if not page_texts:
+            return []
+
+        # 2. 청크 분할 (페이지 정보 유지)
+        raw_chunks = []  # [{"text": "...", "page": N}, ...]
+
+        for page_num, page_text in page_texts:
+            start = 0
+            text_len = len(page_text)
+
+            while start < text_len:
+                end = start + CHUNK_SIZE
+                chunk_text = page_text[start:end]
+
+                # 단어 중간에서 자르지 않기
+                if end < text_len:
+                    last_space = chunk_text.rfind(' ')
+                    last_newline = chunk_text.rfind('\n')
+                    cut_point = max(last_space, last_newline)
+                    if cut_point > CHUNK_SIZE * 0.5:
+                        chunk_text = chunk_text[:cut_point]
+                        end = start + cut_point
+
+                if chunk_text.strip():
+                    raw_chunks.append({
+                        "text": chunk_text.strip(),
+                        "page": page_num
+                    })
+
+                start = end - CHUNK_OVERLAP if end < text_len else text_len
+
+        if not raw_chunks:
+            return []
+
+        print(f"📦 [Chunking] {file_name}: {len(raw_chunks)}개 청크 생성")
+
+        # 3. 키워드 추출 (배치)
+        chunk_texts = [c["text"] for c in raw_chunks]
+
+        try:
+            keywords_list = await model_server_client.extract_keywords_batch(chunk_texts)
+            print(f"🏷️ [Keywords] {len(keywords_list)}개 키워드 추출 완료")
+        except Exception as e:
+            print(f"⚠️ [Keywords] 키워드 추출 실패, 빈 키워드 사용: {e}")
+            keywords_list = [""] * len(raw_chunks)
+
+        # 4. 최종 청크 포맷팅
+        final_chunks = []
+        for i, chunk in enumerate(raw_chunks):
+            keywords = keywords_list[i] if i < len(keywords_list) else ""
+            page = chunk["page"]
+            text = chunk["text"]
+
+            # 포맷: [문서: 파일명 | 페이지: N][키워드: ...]\n본문
+            if keywords:
+                content = f"[문서: {file_name} | 페이지: {page}]\n[키워드: {keywords}]\n\n{text}"
+            else:
+                content = f"[문서: {file_name} | 페이지: {page}]\n\n{text}"
+
+            # 콘텐츠 기반 ID 생성 (중복 방지)
+            # 파일명 + 페이지 + 텍스트 해시 조합
+            content_hash = hashlib.md5(text.encode('utf-8')).hexdigest()[:12]
+            chunk_id = f"{file_name}_{page}_{content_hash}"
+
+            final_chunks.append({
+                "id": chunk_id,
+                "content": content,
+                "metadata": {
+                    "source": file_name,
+                    "page": page,
+                    "keywords": keywords
+                }
+            })
+
+        return final_chunks
+
+    # ============ 이전 Parent-Child 메서드 (deprecated) ============
     def _create_parent_child_chunks(
         self,
         markdown_content: str,
@@ -280,14 +392,13 @@ class RagIngestionService:
         markdown_content = parser.parse_to_markdown()
         return self._create_chunks_with_splitting(markdown_content, file_name, invoke_id)
 
-    def _process_pdf_with_pdf4llm(self, pdf_path: str, display_name: str, invoke_id: str) -> List[Dict]:
-        """pdf4llm을 사용하여 PDF 파일을 청크 목록으로 변환합니다."""
+    def _process_pdf_with_pdf4llm(self, pdf_path: str, display_name: str, invoke_id: str) -> str:
+        """pdf4llm을 사용하여 PDF를 마크다운으로 변환합니다. (페이지 구분자 포함)"""
         if pdf4llm is None:
             logger.error("pdf4llm 라이브러리가 설치되지 않았습니다.")
-            return []
+            return ""
 
         try:
-            # 페이지별로 추출 후 페이지 구분자와 함께 합침
             pages_data = pdf4llm.to_markdown(pdf_path, page_chunks=True)
             markdown_parts = []
             for page_idx, page_data in enumerate(pages_data):
@@ -297,10 +408,11 @@ class RagIngestionService:
                     markdown_parts.append(f"\n--- Page {real_page_num} ---\n{content_text.strip()}")
 
             full_markdown = "\n".join(markdown_parts)
-            return self._create_chunks_with_splitting(full_markdown, display_name, invoke_id)
+            print(f"📄 [PDF] {display_name}: {len(full_markdown)}자, {len(markdown_parts)}페이지")
+            return full_markdown
         except Exception as e:
             logger.exception(f"pdf4llm 변환 중 예외 발생: {e}")
-            return []
+            return ""
 
     def _convert_hwp_to_pdf_with_win32com(self, input_path: str, output_dir: str) -> Optional[str]:
         """win32com을 사용하여 한글(HWP) 파일을 PDF로 변환합니다."""
@@ -366,28 +478,49 @@ class RagIngestionService:
 
     async def _store_chunks_to_colbert(self, chunks: List[Dict], invoke_id: str):
         """
-        청크 목록을 ColBERT 인덱스에 저장합니다.
-        모델 서버의 /index API를 호출합니다.
+        청크 목록을 로컬 ColBERT 인덱스에 저장합니다.
+        - 모델 서버: 인코딩만 담당 (Stateless)
+        - 게이트웨이: Voyager + Redis에 저장
         """
         if not chunks:
             return
 
-        batch_size = 50
         total_chunks = len(chunks)
         logger.info(f"[Ingestion] ColBERT에 저장할 총 청크 수: {total_chunks}")
 
-        for i in range(0, total_chunks, batch_size):
-            batch = chunks[i:i + batch_size]
+        # local_index_service가 내부적으로 배치 처리
+        indexed_count = await local_index_service.index_documents(invoke_id, chunks)
+        logger.info(f"[Ingestion] ColBERT 인덱싱 완료: {indexed_count} / {total_chunks} 청크")
 
-            indexed = await model_server_client.colbert_index(batch, invoke_id)
-            logger.info(f"[Ingestion] 진행률: {min(i + batch_size, total_chunks)} / {total_chunks} 청크 저장 완료.")
-
-    async def ingest_file(self, file_name: str, invoke_id: str, file_path: str, file_extension: Optional[str] = None):
+    async def _store_chunks_to_lightrag(self, chunks: List[Dict], invoke_id: str):
         """
-        파일을 처리하고, 결과를 ColBERT 인덱스에 저장합니다.
-        설정에 따라 Polaris 또는 대체 라이브러리(pdf4llm, MarkItDown, win32com)를 사용합니다.
+        청크 목록을 LightRAG 지식 그래프에 저장합니다.
+        (백그라운드에서 실행됨)
+        """
+        if not chunks:
+            return
+
+        try:
+            logger.info(f"🌿 [Ingestion] LightRAG 인덱싱 시작 (백그라운드)...")
+            await lightrag_service.index_chunks(chunks, invoke_id)
+        except Exception as e:
+            logger.error(f"🌿 [Ingestion] LightRAG 인덱싱 실패: {e}")
+
+    async def ingest_file(self, file_name: str, invoke_id: str, file_path: str, file_extension: Optional[str] = None, on_progress=None):
+        """
+        파일을 처리하고, 결과를 ColBERT 및 LightRAG 인덱스에 저장합니다.
+        
+        Args:
+            file_name: 파일명
+            invoke_id: 세션 ID
+            file_path: 파일 경로
+            file_extension: 확장자
+            on_progress: 진행률 콜백 (async def func(percent, message))
         """
         logger.info(f"[Ingestion] 파일 처리 시작: {file_name} (Room: {invoke_id})")
+
+        if on_progress:
+            await on_progress(0, "파일 처리 시작")
 
         # 확장자 결정 및 파일명 보정
         ext_to_use = ""
@@ -399,99 +532,131 @@ class RagIngestionService:
             _, ext_from_path = os.path.splitext(file_name)
             ext_to_use = ext_from_path.lower().strip()
 
-        # 메타데이터에 저장할 파일명 (확장자가 없으면 붙여줌)
+        # 메타데이터에 저장할 파일명
         if ext_to_use and not file_name.lower().endswith(ext_to_use):
             display_name = file_name + ext_to_use
         else:
             display_name = file_name
 
-        chunks = []
+        markdown_content = ""
+
+        # === 1. 문서 파싱 (0% -> 10%) ===
+        if on_progress:
+            await on_progress(5, "문서 내용 추출 중...")
 
         if settings.POLARIS_ENABLED:
-            logger.info("Polaris 엔진을 사용하여 문서 변환을 시도합니다.")
+            print(f"🔄 [Ingestion] Polaris 엔진 사용")
             with tempfile.TemporaryDirectory() as temp_output_dir:
                 try:
                     polaris_data = await asyncio.to_thread(
                         polaris_converter.convert, file_path, temp_output_dir, True
                     )
                     if polaris_data:
-                        logger.info("Polaris JSON 데이터 처리 중...")
-                        chunks = self._process_polaris_json(polaris_data, display_name, invoke_id)
+                        parser = PolarisJsonParser(polaris_data)
+                        markdown_content = parser.parse_to_markdown()
+                        print(f"📄 [Polaris] {display_name}: {len(markdown_content)}자")
                     else:
-                        logger.error("Polaris 변환 실패 또는 반환 데이터 없음.")
+                        print("❌ [Ingestion] Polaris 변환 실패")
                         return
                 except Exception as e:
-                    logger.exception(f"Polaris 변환 중 예외 발생: {e}")
+                    print(f"❌ [Ingestion] Polaris 오류: {e}")
                     return
         else:
-            logger.info(f"사용할 확장자: '{ext_to_use}' (표시 파일명: {display_name})")
+            print(f"🔄 [Ingestion] 확장자: '{ext_to_use}' (파일명: {display_name})")
 
             # 1. HWP/HWPX 파일 처리
             if ext_to_use in ['.hwp', '.hwpx']:
-                logger.info(f"한글 문서({ext_to_use}) 감지. win32com을 통해 PDF로 변환 후 pdf4llm을 사용합니다.")
+                print(f"📄 [Ingestion] 한글 문서 → PDF 변환 → 마크다운 추출")
                 with tempfile.TemporaryDirectory() as temp_pdf_dir:
                     converted_pdf = await asyncio.to_thread(
                         self._convert_hwp_to_pdf_with_win32com, file_path, temp_pdf_dir
                     )
                     if converted_pdf and os.path.exists(converted_pdf):
-                        logger.info(f"PDF 변환 완료: {converted_pdf}. pdf4llm으로 텍스트를 추출합니다.")
-                        chunks = await asyncio.to_thread(
+                        markdown_content = await asyncio.to_thread(
                             self._process_pdf_with_pdf4llm, converted_pdf, display_name, invoke_id
                         )
-                        if not chunks:
-                            return
                     else:
-                        logger.error("HWP -> PDF 변환 실패.")
+                        print("❌ [Ingestion] HWP → PDF 변환 실패")
                         return
 
-            # 2. 원래 PDF 파일
+            # 2. PDF 파일
             elif ext_to_use == '.pdf':
-                logger.info("PDF 파일 감지. pdf4llm을 사용하여 변환합니다.")
-                chunks = await asyncio.to_thread(
+                print(f"📄 [Ingestion] PDF → 마크다운 추출")
+                markdown_content = await asyncio.to_thread(
                     self._process_pdf_with_pdf4llm, file_path, display_name, invoke_id
                 )
-                if not chunks:
-                    return
 
             # 3. 기타 문서 (MarkItDown)
             else:
-                logger.info(f"일반 문서({ext_to_use}) 감지. MarkItDown을 사용하여 변환합니다.")
+                print(f"📄 [Ingestion] 일반 문서 → MarkItDown 변환")
                 if self._markitdown is None:
-                    logger.error("MarkItDown 라이브러리가 설치되지 않았습니다.")
+                    print("❌ [Ingestion] MarkItDown 미설치")
                     return
 
                 try:
                     result = await asyncio.to_thread(self._markitdown.convert, file_path)
                     if result and result.text_content:
-                        chunks = self._create_chunks_with_splitting(result.text_content, display_name, invoke_id)
-                    else:
-                        logger.warning("MarkItDown 변환 결과가 비어있습니다.")
+                        markdown_content = result.text_content
                 except Exception as e:
-                    logger.exception(f"MarkItDown 변환 중 예외 발생: {e}")
+                    print(f"❌ [Ingestion] MarkItDown 오류: {e}")
                     return
+        
+        if on_progress:
+            await on_progress(10, "문서 파싱 완료")
 
-        if not chunks:
-            logger.warning("[Ingestion] 처리 후 생성된 청크(chunk)가 없습니다.")
+        # 최종 체크
+        if not markdown_content:
+            print("❌ [Ingestion] 마크다운 없음")
             return
 
-        # Parent-Child 청킹 후 저장
-        combined_markdown = "\n\n".join([c.get("content", "") for c in chunks])
-        parent_chunks, child_chunks = self._create_parent_child_chunks(
-            combined_markdown, display_name, invoke_id
-        )
+        # === 2. 청킹 및 키워드 추출 (10% -> 20%) ===
+        if on_progress:
+            await on_progress(15, "텍스트 청킹 및 키워드 추출 중...")
 
-        if parent_chunks:
-            await parent_chunk_store.save_batch(invoke_id, parent_chunks)
-            logger.info(f"[Ingestion] Parent {len(parent_chunks)}개 Redis 저장 완료")
+        # 키워드 enrichment 청킹
+        chunks = await self._create_chunks_with_keywords(markdown_content, display_name)
 
-        if child_chunks:
-            await self._store_chunks_to_colbert(child_chunks, invoke_id)
-            logger.info(f"[Ingestion] Child {len(child_chunks)}개 ColBERT 저장 완료")
+        if not chunks:
+            print("❌ [Ingestion] 청크 생성 실패")
+            return
+            
+        if on_progress:
+            await on_progress(20, f"청크 생성 완료 ({len(chunks)}개). 인덱싱 시작...")
 
-        logger.info(
-            f"[Ingestion] {file_name} Parent-Child 청킹 완료 "
-            f"(Parent: {len(parent_chunks)}, Child: {len(child_chunks)}, Room: {invoke_id})"
-        )
+        # === 3. 병렬 인덱싱 (ColBERT + LightRAG) ===
+        # LightRAG 진행률을 전체의 20% ~ 100%로 매핑
+        
+        async def run_colbert():
+            try:
+                await self._store_chunks_to_colbert(chunks, invoke_id)
+                logger.info(f"✅ [Ingestion] ColBERT 인덱싱 완료")
+            except Exception as e:
+                logger.error(f"❌ [Ingestion] ColBERT 인덱싱 실패: {e}")
+
+        async def run_lightrag():
+            # LightRAG 내부 진행률(0~100)을 전체 공정(20~99)으로 매핑
+            async def lightrag_progress_adapter(p, msg):
+                if on_progress:
+                    # 20 + (p * 0.79) -> 약 20%에서 99%까지
+                    mapped_percent = 20 + int(p * 0.79)
+                    await on_progress(mapped_percent, msg)
+
+            try:
+                logger.info(f"🌿 [Ingestion] LightRAG 인덱싱 시작...")
+                await lightrag_service.index_chunks(chunks, invoke_id, on_progress=lightrag_progress_adapter)
+                logger.info(f"✅ [Ingestion] LightRAG 인덱싱 완료")
+            except Exception as e:
+                logger.error(f"❌ [Ingestion] LightRAG 인덱싱 실패: {e}")
+                # 실패하더라도 전체 프로세스는 멈추지 않음 (선택사항)
+
+        # 두 작업을 동시에 실행
+        await asyncio.gather(run_colbert(), run_lightrag())
+
+        # === 4. 완료 (100%) ===
+        if on_progress:
+            await on_progress(100, "모든 인덱싱 작업 완료!")
+            
+        print(f"🎉 [Ingestion] {file_name} 완료 ({len(chunks)}개 청크)")
 
 
 # 싱글톤 인스턴스

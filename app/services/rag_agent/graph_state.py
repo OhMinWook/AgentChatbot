@@ -24,6 +24,7 @@ class MainState(MessagesState):
     agent_answers: Annotated[List[dict], accumulate_or_reset] = []
     clarification_message: Optional[str] = None
     awaiting_human_input: bool = False
+    filter_filename: Optional[str] = None  # 특정 파일 검색 필터
 
 
 class AgentSubState(TypedDict):

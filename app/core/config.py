@@ -2,7 +2,7 @@ from pydantic import BaseModel
 import os
 
 class Settings(BaseModel):
-    VLLM_BASE_URL: str = os.getenv("VLLM_BASE_URL", "http://198.13.252.3:53242")
+    VLLM_BASE_URL: str = os.getenv("VLLM_BASE_URL", "http://198.13.252.3:58524")
     VLLM_MODEL: str = os.getenv("VLLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B-AWQ")
 
     # 운영에서 흔히 필요한 제한값들 (MVP 기본)
@@ -28,32 +28,24 @@ class Settings(BaseModel):
     STT_BASE_URL: str = os.getenv("STT_BASE_URL", "http://64.247.196.119:13850")
 
     # [모델 서버 설정] 임베딩, Reranker 등을 위한 외부 모델 서버 URL
-    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://195.26.233.58:46909")
+    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://195.26.233.58:45322")
 
     # [RAG 설정] 임베딩 차원 및 인덱스 이름
     EMBEDDING_DIMS: int = 1024
     RAG_INDEX_NAME: str = "otinus_knowledge_index"
 
-    # [Qdrant 설정] Hybrid Search용 벡터 DB
-    QDRANT_HOST: str = os.getenv("QDRANT_HOST", "localhost")
-    QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))
-    QDRANT_COLLECTION_NAME: str = os.getenv("QDRANT_COLLECTION_NAME", "otinus_rag")
-
-    # [Hybrid Search 설정] (Qdrant 브랜치용 - 현재 미사용)
-    DENSE_TOP_K: int = 50
-    SPARSE_TOP_K: int = 50
-    RERANK_TOP_K: int = 5
-
-    # [ColBERT 설정] Jina ColBERT v2
+    # [ColBERT 설정] Jina ColBERT v2 + Voyager 로컬 인덱스
     COLBERT_TOP_K: int = 6  # ColBERT 검색 상위 개수
 
     # [Polaris 설정] Polaris 사용 여부 (False일 경우 pdf4llm/markitdown 등 대체재 사용)
-    POLARIS_ENABLED: bool = True
+    POLARIS_ENABLED: bool = False
 
-    # [Parent-Child Chunking 설정]
-    PARENT_MIN_SIZE: int = 2000   # Parent 청크 최소 크기 (자)
-    PARENT_MAX_SIZE: int = 10000  # Parent 청크 최대 크기 (자)
-    CHILD_CHUNK_SIZE: int = 500   # Child 청크 크기 (ColBERT 검색용)
-    CHILD_CHUNK_OVERLAP: int = 100  # Child 청크 간 겹침
+    # [키워드 추출 서버 설정] 4B LLM 서버 (없으면 MODEL_SERVER_URL 사용)
+    KEYWORD_SERVER_URL: str = os.getenv("KEYWORD_SERVER_URL", "")
+
+    # [Neo4j 설정] LightRAG용 Graph DB
+    NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_USERNAME: str = os.getenv("NEO4J_USERNAME", "neo4j")
+    NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "password")  # 초기 비밀번호 (변경 필요시 수정)
 
 settings = Settings()

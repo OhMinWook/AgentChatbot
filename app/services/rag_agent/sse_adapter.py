@@ -29,7 +29,8 @@ class SSEGraphAdapter:
         self,
         invoke_id: str,
         user_query: str,
-        thread_id: Optional[str] = None
+        thread_id: Optional[str] = None,
+        filter_filename: Optional[str] = None
     ) -> AsyncGenerator[bytes, None]:
         """그래프 실행 및 SSE 스트리밍"""
         if not thread_id:
@@ -46,20 +47,27 @@ class SSEGraphAdapter:
             "rewritten_questions": [],
             "agent_answers": [],
             "clarification_message": None,
-            "awaiting_human_input": False
+            "awaiting_human_input": False,
+            "filter_filename": filter_filename  # 파일 필터링 정보 추가
         }
 
         try:
             yield self._format_sse({"type": "progress", "step": "시작"})
 
             final_state = None
+            sent_progress = set()  # 중복 방지
+
             async for event in self.graph.astream(initial_state, config, stream_mode="values"):
                 final_state = event
 
-                if event.get("conversation_summary") and not event.get("question_is_clear"):
+                # 대화 요약 진행 (1회만)
+                if event.get("conversation_summary") and "summary" not in sent_progress:
+                    sent_progress.add("summary")
                     yield self._format_sse({"type": "progress", "step": "대화 맥락 분석 중"})
 
-                if event.get("rewritten_questions"):
+                # 질문 분석 완료 (1회만)
+                if event.get("rewritten_questions") and "analyzed" not in sent_progress:
+                    sent_progress.add("analyzed")
                     questions = event.get("rewritten_questions", [])
                     yield self._format_sse({
                         "type": "progress",

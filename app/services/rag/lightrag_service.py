@@ -1,38 +1,15 @@
 import logging
 import asyncio
 from typing import List, Dict, Any, Optional
-from langchain_community.graphs import Neo4jGraph
+from langchain_neo4j import Neo4jGraph
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
 
 from app.core.config import settings
 from app.services.clients.llm_client import llm_client
+from app.services.clients.model_server_client import model_server_client
 
 logger = logging.getLogger(__name__)
-
-# 엔티티 및 관계 추출 프롬프트 (LightRAG 스타일)
-ENTITY_EXTRACTION_PROMPT = """
-당신은 텍스트에서 지식 그래프를 구축하기 위한 데이터 추출 전문가입니다.
-주어진 텍스트에서 중요한 **엔티티(Entity)**와 그들 간의 **관계(Relationship)**를 추출하세요.
-
-## 추출 가이드라인
-1. **엔티티**: 사람, 조직, 장소, 개념, 사건, 날짜 등 중요한 명사구.
-2. **관계**: 엔티티 사이의 상호작용이나 속성을 나타내는 동사구.
-3. **형식**: (주체_엔티티) -[관계]-> (목적어_엔티티)
-
-## 텍스트
-{text}
-
-## 출력 형식 (JSON)
-{{
-  "entities": [
-    {{"name": "엔티티이름", "type": "유형", "description": "한줄설명"}}
-  ],
-  "relationships": [
-    {{"source": "주체", "target": "목적어", "type": "관계유형", "description": "관계설명"}}
-  ]
-}}
-"""
 
 GRAPH_SEARCH_PROMPT = """
 당신은 지식 그래프 검색 전문가입니다.
@@ -61,7 +38,8 @@ class LightRAGService:
             self.neo4j_graph = Neo4jGraph(
                 url=settings.NEO4J_URI,
                 username=settings.NEO4J_USERNAME,
-                password=settings.NEO4J_PASSWORD
+                password=settings.NEO4J_PASSWORD,
+                refresh_schema=False  # APOC 의존성 제거 및 초기화 속도 향상
             )
             logger.info("✅ Neo4j Connected for LightRAG")
         except Exception as e:
@@ -71,99 +49,47 @@ class LightRAGService:
     async def index_chunks(self, chunks: List[Dict], invoke_id: str, on_progress=None):
         """
         청크 목록을 받아 엔티티/관계를 추출하고 Neo4j에 저장합니다.
-        (비동기 처리를 위해 배치로 실행)
+        (모델 서버의 경량화 LLM 활용)
         
         Args:
             chunks: 청크 리스트
             invoke_id: 세션 ID
-            on_progress: 진행률 콜백 함수 (async def func(percent, message)) - 50% ~ 100% 구간 담당
+            on_progress: 진행률 콜백 함수
         """
         if not self.neo4j_graph:
             logger.warning("Neo4j not connected, skipping indexing.")
             return
 
         total_chunks = len(chunks)
-        logger.info(f"🌿 [LightRAG] {total_chunks}개 청크 인덱싱 시작...")
+        logger.info(f"🌿 [LightRAG] {total_chunks}개 청크 인덱싱 시작 (모델 서버 활용)...")
 
-        # 비동기 세마포어로 동시 실행 제한 (LLM 부하 조절)
-        sem = asyncio.Semaphore(3)
+        # 배치 단위로 모델 서버에 요청 (한 번에 8개씩)
+        batch_size = 8
         completed_count = 0
 
-        async def process_chunk(chunk):
-            nonlocal completed_count
-            async with sem:
-                text = chunk.get("content", "")
-                if not text:
-                    return
+        for i in range(0, total_chunks, batch_size):
+            batch = chunks[i:i + batch_size]
+            batch_texts = [c.get("content", "") for c in batch]
+            
+            # 1. 모델 서버에서 엔티티/관계 배치 추출
+            try:
+                graph_results = await model_server_client.extract_graph_batch(batch_texts)
                 
-                # 메타데이터에서 소스(파일명) 추출
-                metadata = chunk.get("metadata", {})
-                source_file = metadata.get("source", "unknown")
+                # 2. Neo4j 저장 쿼리 생성
+                all_queries = []
                 
-                # 1. LLM으로 엔티티/관계 추출
-                try:
-                    extraction_payload = {
-                        "model": settings.VLLM_MODEL,
-                        "messages": [
-                            {"role": "system", "content": "You are a knowledge graph extractor."},
-                            {"role": "user", "content": ENTITY_EXTRACTION_PROMPT.format(text=text[:3000])} # 길이 제한
-                        ],
-                        "max_tokens": 2048,
-                        "temperature": 0,
-                        "guided_json": {
-                            "type": "object",
-                            "properties": {
-                                "entities": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "name": {"type": "string"},
-                                            "type": {"type": "string"},
-                                            "description": {"type": "string"}
-                                        },
-                                        "required": ["name", "type"]
-                                    }
-                                },
-                                "relationships": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "source": {"type": "string"},
-                                            "target": {"type": "string"},
-                                            "type": {"type": "string"},
-                                            "description": {"type": "string"}
-                                        },
-                                        "required": ["source", "target", "type"]
-                                    }
-                                }
-                            },
-                            "required": ["entities", "relationships"]
-                        }
-                    }
+                for idx, data in enumerate(graph_results):
+                    chunk_meta = batch[idx].get("metadata", {})
+                    source_file = chunk_meta.get("source", "unknown")
                     
-                    response = await llm_client.chat_completions(extraction_payload)
-                    result_json = response['choices'][0]['message']['content']
-                    
-                    import json
-                    data = json.loads(result_json)
-                    
-                    # 2. Neo4j에 Cypher 쿼리로 저장
-                    queries = []
-                    
-                    # 엔티티 생성 (MERGE)
+                    # 엔티티 쿼리
                     for entity in data.get("entities", []):
-                        # invoke_id와 name으로 유니크 엔티티 식별
-                        # source는 리스트 형태로 관리하거나, 가장 최근 파일명으로 덮어씀 (여기선 단순화하여 덮어쓰기)
-                        # 실제로는 한 엔티티가 여러 문서에 나올 수 있으므로, source를 속성으로 관리 시 주의 필요
-                        # 여기서는 간단히 '주요 출처' 개념으로 저장
                         cypher = """
                         MERGE (e:Entity {name: $name, invoke_id: $invoke_id})
                         ON CREATE SET e.type = $type, e.description = $desc, e.source = $source
                         ON MATCH SET e.source = $source
                         """
-                        queries.append((cypher, {
+                        all_queries.append((cypher, {
                             "name": entity["name"], 
                             "type": entity.get("type", "Thing"), 
                             "desc": entity.get("description", ""),
@@ -171,7 +97,7 @@ class LightRAGService:
                             "source": source_file
                         }))
                     
-                    # 관계 생성 (MERGE)
+                    # 관계 쿼리
                     for rel in data.get("relationships", []):
                         cypher = f"""
                         MATCH (a:Entity {{name: $source_node, invoke_id: $invoke_id}})
@@ -179,32 +105,27 @@ class LightRAGService:
                         MERGE (a)-[r:{rel['type'].upper().replace(' ', '_')}]->(b)
                         SET r.description = $desc, r.source = $source
                         """
-                        queries.append((cypher, {
+                        all_queries.append((cypher, {
                             "source_node": rel["source"],
                             "target_node": rel["target"],
                             "desc": rel.get("description", ""),
                             "invoke_id": invoke_id,
                             "source": source_file
                         }))
-                        
-                    # Neo4j 실행
-                    if queries:
-                        await asyncio.to_thread(self._execute_batch, queries)
                 
-                except Exception as e:
-                    logger.error(f"Extraction failed for chunk: {e}")
-                
-                # 진행률 업데이트 (50% ~ 100% 구간)
-                completed_count += 1
-                if on_progress:
-                    # LightRAG는 전체 공정의 50% ~ 95% 정도 차지한다고 가정
-                    progress = 50 + int((completed_count / total_chunks) * 45)
-                    await on_progress(progress, f"지식 그래프 구축 중 ({completed_count}/{total_chunks})")
+                # 3. Neo4j 실행
+                if all_queries:
+                    await asyncio.to_thread(self._execute_batch, all_queries)
+                    
+            except Exception as e:
+                logger.error(f"Batch graph extraction/storage failed: {e}")
 
-        # 태스크 생성 및 실행
-        tasks = [process_chunk(chunk) for chunk in chunks]
-        await asyncio.gather(*tasks)
-        
+            # 진행률 업데이트
+            completed_count += len(batch)
+            if on_progress:
+                progress = 50 + int((completed_count / total_chunks) * 45)
+                await on_progress(progress, f"지식 그래프 구축 중 ({completed_count}/{total_chunks})")
+
         logger.info(f"🌿 [LightRAG] 인덱싱 완료")
 
     def _execute_batch(self, queries):

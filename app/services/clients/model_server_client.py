@@ -106,6 +106,33 @@ class ModelServerClient:
             raise e
 
     # ========================================
+    # 지식 그래프 추출 API (LightRAG)
+    # ========================================
+
+    async def extract_graph_batch(self, texts: List[str]) -> List[Dict]:
+        """
+        텍스트 배치에서 엔티티 및 관계 추출 (LightRAG용)
+        Returns: [{"entities": [...], "relationships": [...]}, ...]
+        """
+        if not texts:
+            return []
+
+        url = f"{self.base_url}/extract_graph"
+        payload = {"texts": texts}
+
+        try:
+            # 배치 처리는 시간이 오래 걸릴 수 있으므로 넉넉한 타임아웃 설정
+            response = await self.async_client.post(url, json=payload, headers=self.headers, timeout=300.0)
+            response.raise_for_status()
+            return response.json()["results"]
+        except httpx.HTTPStatusError as e:
+            print(f"Model Server Error (Graph Extraction): {e.response.text}")
+            return [{"entities": [], "relationships": []}] * len(texts)
+        except Exception as e:
+            print(f"Model Server Connection Error (Graph Extraction): {e}")
+            return [{"entities": [], "relationships": []}] * len(texts)
+
+    # ========================================
     # 헬스 체크
     # ========================================
 

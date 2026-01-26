@@ -506,15 +506,14 @@ class RagIngestionService:
         except Exception as e:
             logger.error(f"🌿 [Ingestion] LightRAG 인덱싱 실패: {e}")
 
-    async def ingest_file(self, file_name: str, invoke_id: str, file_path: str, file_extension: Optional[str] = None, on_progress=None):
+    async def ingest_file(self, file_name: str, invoke_id: str, file_path: str, on_progress=None):
         """
         파일을 처리하고, 결과를 ColBERT 및 LightRAG 인덱스에 저장합니다.
         
         Args:
-            file_name: 파일명
+            file_name: 파일명 (확장자 포함, 예: 'report.pdf')
             invoke_id: 세션 ID
             file_path: 파일 경로
-            file_extension: 확장자
             on_progress: 진행률 콜백 (async def func(percent, message))
         """
         logger.info(f"[Ingestion] 파일 처리 시작: {file_name} (Room: {invoke_id})")
@@ -522,21 +521,12 @@ class RagIngestionService:
         if on_progress:
             await on_progress(0, "파일 처리 시작")
 
-        # 확장자 결정 및 파일명 보정
-        ext_to_use = ""
-        if file_extension:
-            ext_to_use = file_extension.lower().strip()
-            if not ext_to_use.startswith('.'):
-                ext_to_use = '.' + ext_to_use
-        else:
-            _, ext_from_path = os.path.splitext(file_name)
-            ext_to_use = ext_from_path.lower().strip()
-
-        # 메타데이터에 저장할 파일명
-        if ext_to_use and not file_name.lower().endswith(ext_to_use):
-            display_name = file_name + ext_to_use
-        else:
-            display_name = file_name
+        # 파일명 자체가 display_name (확장자 포함됨)
+        display_name = file_name
+        
+        # 확장자 추출
+        _, ext = os.path.splitext(display_name)
+        ext_to_use = ext.lower().strip()
 
         markdown_content = ""
 

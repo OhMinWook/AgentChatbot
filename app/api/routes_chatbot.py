@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Form, File, UploadFile
 from fastapi.responses import StreamingResponse
@@ -42,8 +43,6 @@ async def _stream_chat_response(
         label = f" ({history_label})" if history_label else ""
         print(f"📝 [History Saved] invokeId: {invoke_id}{label}")
 
-
-import asyncio  # 상단 import 추가 필요하지만 여기서는 함수 내부에서 사용
 
 @router.post("/upload/{invokeId}", summary="문서 업로드 및 인덱싱 (SSE)")
 async def upload_document(
@@ -104,6 +103,9 @@ async def upload_document(
                 if data is None:
                     break
                 yield data
+
+            # 태스크 완료 대기 및 예외 전파
+            await task
 
         return StreamingResponse(
             stream_progress(), 

@@ -28,7 +28,7 @@ class Settings(BaseModel):
     STT_BASE_URL: str = os.getenv("STT_BASE_URL", "http://64.247.196.119:13850")
 
     # [모델 서버 설정] 임베딩, Reranker 등을 위한 외부 모델 서버 URL
-    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://198.13.252.5:10973")
+    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://198.13.252.5:11767")
 
     # [RAG 설정] 임베딩 차원 및 인덱스 이름
     EMBEDDING_DIMS: int = 1024

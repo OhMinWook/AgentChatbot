@@ -28,7 +28,7 @@ from app.services.rag.lightrag_service import lightrag_service
 logger = logging.getLogger(__name__)
 
 
-async def _call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, guided_json: Dict = None) -> str:
+async def _call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json_schema: Dict = None) -> str:
     """LLM 호출 헬퍼 함수"""
     try:
         payload = {
@@ -38,9 +38,11 @@ async def _call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, guid
             "temperature": 0
         }
 
-        # vLLM guided decoding (JSON 양식 고정)
-        if guided_json:
-            payload["guided_json"] = guided_json
+        # vLLM structured_outputs (JSON 양식 고정)
+        if json_schema:
+            payload["extra_body"] = {
+                "structured_outputs": {"json": json_schema}
+            }
 
         response = await llm_client.chat_completions(payload)
         content = response["choices"][0]["message"]["content"]
@@ -106,7 +108,7 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
     )
 
     # JSON 스키마로 구조화된 응답 요청
-    guided_json = {
+    json_schema = {
         "type": "object",
         "properties": {
             "is_clear": {"type": "boolean"},
@@ -123,7 +125,7 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
     response = await _call_llm(
         [{"role": "user", "content": prompt}],
         max_tokens=1024,
-        guided_json=guided_json
+        json_schema=json_schema
     )
 
     print(f"🔍 [Analyze] LLM 응답: {response[:500] if response else '(빈 응답)'}")

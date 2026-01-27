@@ -4,7 +4,6 @@ import logging
 import os
 import re
 import hashlib
-import uuid
 from typing import List, Dict, Any, Optional, Tuple
 
 # Polaris 비활성화 시 사용할 대체 라이브러리들
@@ -371,16 +370,21 @@ class RagIngestionService:
         if on_progress:
             await on_progress(20, f"청크 생성 완료 ({len(chunks)}개). 인덱싱 시작...")
 
-        # === 3. 병렬 인덱싱 (ColBERT + LightRAG) ===
-        # LightRAG 진행률을 전체의 20% ~ 100%로 매핑
+        # === 3. 병렬 인덱싱 (ColBERT Only - LightRAG 잠시 비활성화) ===
         
         async def run_colbert():
             try:
+                if on_progress:
+                    await on_progress(30, "ColBERT 인덱싱 저장 중...")
                 await self._store_chunks_to_colbert(chunks, invoke_id)
                 logger.info(f"✅ [Ingestion] ColBERT 인덱싱 완료")
+                if on_progress:
+                    await on_progress(90, "ColBERT 인덱싱 완료")
             except Exception as e:
                 logger.error(f"❌ [Ingestion] ColBERT 인덱싱 실패: {e}")
 
+        # LightRAG는 현재 비활성화 (필요 시 주석 해제)
+        """
         async def run_lightrag():
             # LightRAG 내부 진행률(0~100)을 전체 공정(20~99)으로 매핑
             async def lightrag_progress_adapter(p, msg):
@@ -395,10 +399,10 @@ class RagIngestionService:
                 logger.info(f"✅ [Ingestion] LightRAG 인덱싱 완료")
             except Exception as e:
                 logger.error(f"❌ [Ingestion] LightRAG 인덱싱 실패: {e}")
-                # 실패하더라도 전체 프로세스는 멈추지 않음 (선택사항)
+        """
 
-        # 두 작업을 동시에 실행
-        await asyncio.gather(run_colbert(), run_lightrag())
+        # ColBERT만 실행
+        await run_colbert()
 
         # === 4. 완료 (100%) ===
         if on_progress:

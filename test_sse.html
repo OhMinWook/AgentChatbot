@@ -2,155 +2,323 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>Agentic RAG 테스트</title>
+    <title>Agentic RAG Test Console</title>
     <style>
-        body { font-family: 'Malgun Gothic', sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
-        .section { margin-bottom: 30px; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
-        label { display: block; margin-bottom: 5px; font-weight: bold; }
-        input[type="text"], textarea { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
-        button { padding: 12px 24px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; margin-right: 10px; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 900px; margin: 30px auto; padding: 20px; background-color: #f4f4f9; color: #333; }
+        h1 { text-align: center; color: #444; }
+        .container { display: flex; gap: 20px; }
+        .left-panel { flex: 1; min-width: 300px; }
+        .right-panel { flex: 2; }
+        
+        .section { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        label { display: block; margin-bottom: 5px; font-weight: 600; font-size: 0.9em; color: #666; }
+        input[type="text"], input[type="file"], textarea { width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        button { width: 100%; padding: 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.3s; margin-bottom: 5px; }
         button:hover { background: #0056b3; }
-        button:disabled { background: #ccc; }
-        #log { background: #1e1e1e; color: #d4d4d4; padding: 20px; border-radius: 8px; height: 400px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; white-space: pre-wrap; }
+        button.secondary { background: #6c757d; }
+        button.secondary:hover { background: #545b62; }
+        
+        /* File List */
+        #fileList { list-style: none; padding: 0; margin: 0; max-height: 150px; overflow-y: auto; border: 1px solid #eee; border-radius: 4px; }
+        #fileList li { padding: 8px; border-bottom: 1px solid #eee; cursor: pointer; display: flex; align-items: center; }
+        #fileList li:hover { background-color: #f0f8ff; }
+        #fileList li.selected { background-color: #e7f1ff; border-left: 4px solid #007bff; font-weight: bold; }
+        #fileList li input[type="radio"] { margin-right: 10px; width: auto; }
+
+        /* Progress Bar */
+        #progressContainer { display: none; margin-top: 10px; background: #eee; border-radius: 4px; overflow: hidden; }
+        #progressBar { width: 0%; height: 20px; background: #28a745; text-align: center; line-height: 20px; color: white; font-size: 12px; transition: width 0.3s; }
+
+        /* Logs */
+        #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 8px; height: 500px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; white-space: pre-wrap; line-height: 1.5; }
+        .log-msg { margin-bottom: 5px; }
         .event-progress { color: #569cd6; }
-        .event-clarification { color: #ce9178; font-weight: bold; }
-        .event-references { color: #b5cea8; }
+        .event-clarification { color: #ce9178; font-weight: bold; border: 1px solid #ce9178; padding: 10px; border-radius: 4px; background: #2d2d2d; margin: 10px 0; }
+        .event-references { color: #b5cea8; font-size: 0.9em; margin-top: 5px; }
         .event-answer { color: #4ec9b0; }
         .event-done { color: #608b4e; }
         .event-error { color: #f44747; }
-        .continue-section { display: none; background: #fff3cd; padding: 15px; border-radius: 8px; margin-top: 15px; }
-        .continue-section.active { display: block; }
+        
+        .hitl-form { margin-top: 10px; display: flex; gap: 10px; }
+        .hitl-form input { flex: 1; margin-bottom: 0; }
+        .hitl-form button { width: auto; margin-bottom: 0; }
+        
+        .mode-switch { display: flex; gap: 10px; margin-bottom: 10px; }
+        .mode-switch label { cursor: pointer; display: flex; align-items: center; background: #eee; padding: 8px 15px; border-radius: 20px; font-weight: normal; }
+        .mode-switch input:checked + span { font-weight: bold; color: #007bff; }
     </style>
 </head>
 <body>
-    <h1>Agentic RAG API 테스트</h1>
+    <h1>🤖 Agentic RAG Test Console</h1>
 
-    <div class="section">
-        <label>Server URL</label>
-        <input type="text" id="serverUrl" value="http://localhost:8000">
+    <div class="container">
+        <!-- Left Panel: Settings & Upload -->
+        <div class="left-panel">
+            <div class="section">
+                <label>Server URL</label>
+                <input type="text" id="serverUrl" value="http://localhost:8000">
+                <label>Invoke ID (Room)</label>
+                <input type="text" id="invokeId" value="test-room-001">
+                <button class="secondary" onclick="loadFileList()">📂 파일 목록 새로고침</button>
+            </div>
 
-        <label>Invoke ID (대화방 ID)</label>
-        <input type="text" id="invokeId" value="test-room-001">
+            <div class="section">
+                <label>File Upload</label>
+                <input type="file" id="fileInput">
+                <div id="progressContainer">
+                    <div id="progressBar">0%</div>
+                </div>
+                <div id="uploadStatus" style="font-size: 12px; color: #666; margin-top: 5px;"></div>
+                <button onclick="uploadFile()">⬆️ 업로드 시작</button>
+            </div>
 
-        <label>Message</label>
-        <textarea id="message" rows="3" placeholder="질문을 입력하세요...">2024년 매출이 얼마야?</textarea>
+            <div class="section">
+                <label>Target File (Private Search)</label>
+                <ul id="fileList">
+                    <li style="color:#999; text-align:center;">파일 목록을 불러오세요.</li>
+                </ul>
+                <input type="hidden" id="selectedFile">
+            </div>
+        </div>
 
-        <label>File (선택)</label>
-        <input type="file" id="fileInput">
+        <!-- Right Panel: Chat -->
+        <div class="right-panel">
+            <div class="section">
+                <label>Chat Mode</label>
+                <div class="mode-switch">
+                    <label>
+                        <input type="radio" name="chatMode" value="open" checked onclick="toggleFileSelection()">
+                        <span>🌐 Open (전체 검색)</span>
+                    </label>
+                    <label>
+                        <input type="radio" name="chatMode" value="private" onclick="toggleFileSelection()">
+                        <span>🔒 Private (특정 파일)</span>
+                    </label>
+                </div>
 
-        <br>
-        <button onclick="sendMessage()">전송</button>
-        <button onclick="clearLog()">로그 지우기</button>
-    </div>
+                <label>Message</label>
+                <textarea id="message" rows="3" placeholder="질문을 입력하세요... (예: 이 문서 요약해줘)"></textarea>
+                <button onclick="sendMessage()">💬 전송</button>
+                <button class="secondary" onclick="document.getElementById('log').innerHTML=''">로그 지우기</button>
+            </div>
 
-    <div class="continue-section" id="continueSection">
-        <strong>명확화 요청이 왔습니다!</strong>
-        <p id="clarificationMessage"></p>
-        <input type="text" id="continueResponse" placeholder="응답을 입력하세요...">
-        <button onclick="sendContinue()">계속하기</button>
-    </div>
-
-    <div class="section">
-        <h3>Response Log</h3>
-        <div id="log"></div>
+            <div class="section" style="padding: 0; background: none;">
+                <div id="log"></div>
+            </div>
+        </div>
     </div>
 
     <script>
+        const logDiv = document.getElementById('log');
         let currentThreadId = null;
 
-        function log(message, eventType = '') {
-            const logDiv = document.getElementById('log');
-            const className = eventType ? `event-${eventType}` : '';
-            const timestamp = new Date().toLocaleTimeString();
-            logDiv.innerHTML += `<span class="${className}">[${timestamp}] ${message}</span>\n`;
+        function log(msg, type = '') {
+            const div = document.createElement('div');
+            div.className = `log-msg event-${type}`;
+            
+            // HTML 렌더링을 위해 innerHTML 사용 (HITL 폼 삽입 등)
+            if (type === 'html') {
+                div.innerHTML = msg;
+            } else {
+                const time = new Date().toLocaleTimeString();
+                div.textContent = `[${time}] ${msg}`;
+            }
+            
+            logDiv.appendChild(div);
             logDiv.scrollTop = logDiv.scrollHeight;
         }
 
-        function clearLog() {
-            document.getElementById('log').innerHTML = '';
-            document.getElementById('continueSection').classList.remove('active');
-            currentThreadId = null;
+        function toggleFileSelection() {
+            const mode = document.querySelector('input[name="chatMode"]:checked').value;
+            const fileList = document.getElementById('fileList');
+            if (mode === 'private') {
+                fileList.style.borderColor = '#007bff';
+                if (!document.getElementById('selectedFile').value) {
+                    alert('Private 모드는 파일 목록에서 검색할 파일을 선택해야 합니다.');
+                }
+            } else {
+                fileList.style.borderColor = '#eee';
+            }
+        }
+
+        async function loadFileList() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            const invokeId = document.getElementById('invokeId').value;
+            const listEl = document.getElementById('fileList');
+
+            try {
+                const res = await fetch(`${serverUrl}/files/${invokeId}`);
+                const data = await res.json();
+                
+                listEl.innerHTML = '';
+                if (data.files.length === 0) {
+                    listEl.innerHTML = '<li style="color:#999; text-align:center;">업로드된 파일이 없습니다.</li>';
+                    return;
+                }
+
+                data.files.forEach(file => {
+                    const li = document.createElement('li');
+                    li.innerHTML = `<input type="radio" name="fileSelect" value="${file}"> ${file}`;
+                    li.onclick = () => {
+                        document.querySelectorAll('#fileList li').forEach(el => el.classList.remove('selected'));
+                        document.querySelectorAll('input[name="fileSelect"]').forEach(el => el.checked = false);
+                        li.classList.add('selected');
+                        li.querySelector('input').checked = true;
+                        document.getElementById('selectedFile').value = file;
+                        
+                        // Private 모드로 자동 전환
+                        document.querySelector('input[value="private"]').checked = true;
+                        toggleFileSelection();
+                    };
+                    listEl.appendChild(li);
+                });
+                log(`파일 목록 갱신 완료 (${data.files.length}개)`, 'done');
+            } catch (e) {
+                log(`파일 목록 로드 실패: ${e.message}`, 'error');
+            }
+        }
+
+        async function uploadFile() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            const invokeId = document.getElementById('invokeId').value;
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+
+            if (!file) return alert('파일을 선택해주세요.');
+
+            const formData = new FormData();
+            formData.append('attachFile_bin', file);
+            // 파일명에 확장자 포함해서 전송
+            formData.append('attachFile_name', file.name);
+
+            document.getElementById('progressContainer').style.display = 'block';
+            const progressBar = document.getElementById('progressBar');
+            const statusText = document.getElementById('uploadStatus');
+
+            log(`업로드 시작: ${file.name}`, 'progress');
+
+            try {
+                const response = await fetch(`${serverUrl}/upload/${invokeId}`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                await handleSSE(response, (data) => {
+                    if (data.type === 'progress') {
+                        progressBar.style.width = `${data.percent}%`;
+                        progressBar.textContent = `${data.percent}%`;
+                        statusText.textContent = data.message;
+                    } else if (data.type === 'done') {
+                        progressBar.style.width = '100%';
+                        progressBar.textContent = '완료';
+                        statusText.textContent = data.message;
+                        log(`업로드 완료: ${data.message}`, 'done');
+                        loadFileList(); // 목록 갱신
+                    } else if (data.type === 'error') {
+                        log(`업로드 에러: ${data.detail}`, 'error');
+                    }
+                });
+            } catch (e) {
+                log(`업로드 네트워크 오류: ${e.message}`, 'error');
+            }
         }
 
         async function sendMessage() {
             const serverUrl = document.getElementById('serverUrl').value;
             const invokeId = document.getElementById('invokeId').value;
             const message = document.getElementById('message').value;
-            const fileInput = document.getElementById('fileInput');
+            const mode = document.querySelector('input[name="chatMode"]:checked').value;
+            const targetFile = document.getElementById('selectedFile').value;
+
+            if (!message) return alert('메시지를 입력하세요.');
 
             const formData = new FormData();
             formData.append('message', message);
 
-            if (fileInput.files.length > 0) {
-                const file = fileInput.files[0];
-                const nameParts = file.name.split('.');
-                const ext = nameParts.pop();
-                const name = nameParts.join('.');
-                formData.append('attachFile_name', name);
-                formData.append('attachFile_extension', ext);
-                formData.append('attachFile_bin', file);
-                log(`파일 첨부: ${file.name}`);
+            let endpoint = '';
+            if (mode === 'private') {
+                if (!targetFile) return alert('Private 모드는 파일을 선택해야 합니다.');
+                endpoint = `/message/private/${invokeId}`;
+                formData.append('target_filename', targetFile);
+                log(`[Private] ${targetFile} 검색 요청: ${message}`, 'progress');
+            } else {
+                endpoint = `/message/open/${invokeId}`;
+                log(`[Open] 전체 검색 요청: ${message}`, 'progress');
             }
 
-            log(`요청: POST /message/${invokeId}`);
-            log(`메시지: ${message}`);
-            log('---');
-
             try {
-                const response = await fetch(`${serverUrl}/message/${invokeId}`, {
+                const response = await fetch(`${serverUrl}${endpoint}`, {
                     method: 'POST',
                     body: formData
                 });
-
-                await handleSSEResponse(response);
-            } catch (error) {
-                log(`네트워크 오류: ${error.message}`, 'error');
+                
+                await handleChatSSE(response);
+            } catch (e) {
+                log(`채팅 요청 실패: ${e.message}`, 'error');
             }
         }
 
-        async function sendContinue() {
+        async function sendContinue(responseMsg) {
             const serverUrl = document.getElementById('serverUrl').value;
             const invokeId = document.getElementById('invokeId').value;
-            const response = document.getElementById('continueResponse').value;
 
-            if (!currentThreadId) {
-                log('thread_id가 없습니다.', 'error');
-                return;
-            }
+            if (!currentThreadId) return alert('Thread ID가 없습니다.');
 
             const formData = new FormData();
             formData.append('thread_id', currentThreadId);
-            formData.append('response', response);
+            formData.append('response', responseMsg);
 
-            log(`요청: POST /message/${invokeId}/continue`);
-            log(`thread_id: ${currentThreadId}`);
-            log(`응답: ${response}`);
-            log('---');
-
-            document.getElementById('continueSection').classList.remove('active');
+            log(`명확화 응답 전송: ${responseMsg}`, 'progress');
+            
+            // 기존 입력폼 제거
+            const form = document.getElementById(`hitl-${currentThreadId}`);
+            if(form) form.remove();
 
             try {
                 const res = await fetch(`${serverUrl}/message/${invokeId}/continue`, {
                     method: 'POST',
                     body: formData
                 });
-
-                await handleSSEResponse(res);
-            } catch (error) {
-                log(`네트워크 오류: ${error.message}`, 'error');
+                await handleChatSSE(res);
+            } catch (e) {
+                log(`Continue 요청 실패: ${e.message}`, 'error');
             }
         }
 
-        async function handleSSEResponse(response) {
+        async function handleChatSSE(response) {
+            await handleSSE(response, (data) => {
+                if (data.type === 'answer') {
+                    log(data.content, 'answer');
+                } else if (data.type === 'references') {
+                    const refs = data.docs.map(d => `📄 ${d.source} (p.${d.page})`).join(', ');
+                    log(`참고 문서: ${refs}`, 'references');
+                } else if (data.type === 'clarification_needed') {
+                    currentThreadId = data.thread_id;
+                    const html = `
+                        <div class="event-clarification" id="hitl-${data.thread_id}">
+                            <div>🤖 <strong>AI의 질문:</strong> ${data.message}</div>
+                            <div class="hitl-form">
+                                <input type="text" id="input-${data.thread_id}" placeholder="답변을 입력하세요">
+                                <button onclick="sendContinue(document.getElementById('input-${data.thread_id}').value)">전송</button>
+                            </div>
+                        </div>
+                    `;
+                    log(html, 'html');
+                } else if (data.type === 'error') {
+                    log(`에러 발생: ${data.message || data.detail}`, 'error');
+                } else if (data.type === 'done') {
+                    log('--- 답변 완료 ---', 'done');
+                }
+            });
+        }
+
+        async function handleSSE(response, callback) {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
 
             while (true) {
                 const { done, value } = await reader.read();
-                if (done) {
-                    log('--- 스트림 종료 ---');
-                    break;
-                }
+                if (done) break;
 
                 const chunk = decoder.decode(value);
                 const lines = chunk.split('\n');
@@ -158,54 +326,15 @@
                 for (const line of lines) {
                     if (line.startsWith('data: ')) {
                         try {
-                            const data = JSON.parse(line.slice(6));
-                            handleEvent(data);
+                            const jsonStr = line.slice(6);
+                            if (!jsonStr.trim()) continue;
+                            const data = JSON.parse(jsonStr);
+                            callback(data);
                         } catch (e) {
-                            log(`파싱 오류: ${line}`, 'error');
+                            console.error('SSE Parsing Error:', e);
                         }
                     }
                 }
-            }
-        }
-
-        function handleEvent(data) {
-            switch (data.type) {
-                case 'progress':
-                    log(`[progress] ${data.step}`, 'progress');
-                    break;
-
-                case 'clarification_needed':
-                    log(`[clarification_needed]`, 'clarification');
-                    log(`  message: ${data.message}`, 'clarification');
-                    log(`  thread_id: ${data.thread_id}`, 'clarification');
-                    currentThreadId = data.thread_id;
-                    document.getElementById('clarificationMessage').textContent = data.message;
-                    document.getElementById('continueSection').classList.add('active');
-                    document.getElementById('continueResponse').focus();
-                    break;
-
-                case 'references':
-                    log(`[references]`, 'references');
-                    data.docs.forEach(doc => {
-                        log(`  - ${doc.source} (page ${doc.page})`, 'references');
-                    });
-                    break;
-
-                case 'answer':
-                    log(`[answer]`, 'answer');
-                    log(data.content, 'answer');
-                    break;
-
-                case 'done':
-                    log(`[done] 완료`, 'done');
-                    break;
-
-                case 'error':
-                    log(`[error] ${data.message}`, 'error');
-                    break;
-
-                default:
-                    log(`[unknown] ${JSON.stringify(data)}`);
             }
         }
     </script>

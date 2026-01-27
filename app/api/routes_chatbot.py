@@ -43,6 +43,8 @@ async def _stream_chat_response(
         print(f"📝 [History Saved] invokeId: {invoke_id}{label}")
 
 
+import asyncio  # 상단 import 추가 필요하지만 여기서는 함수 내부에서 사용
+
 @router.post("/upload/{invokeId}", summary="문서 업로드 및 인덱싱 (SSE)")
 async def upload_document(
         invokeId: str,
@@ -51,26 +53,15 @@ async def upload_document(
 ):
     """
     RAG 검색을 위한 문서 업로드 엔드포인트 (SSE 스트리밍)
-    
-    - 파일을 저장하고 ColBERT 및 LightRAG 인덱싱을 수행합니다.
-    - SSE를 통해 실시간 진행률(%)을 제공합니다.
-    
-    **SSE 이벤트 타입:**
-    - `progress`: {"percent": int, "message": str}
-    - `done`: {"message": str}
-    - `error`: {"detail": str}
     """
     try:
         # 파일 저장 준비
         upload_dir = os.path.join(settings.UPLOAD_DIR, invokeId)
         os.makedirs(upload_dir, exist_ok=True)
         
-        # 파일명 결정 (클라이언트가 지정한 이름 우선, 없으면 원본 파일명)
         final_filename = attachFile_name if attachFile_name else attachFile_bin.filename
-        
         saved_file_path = os.path.join(upload_dir, final_filename)
         
-        # 파일 내용을 미리 읽음 (스트리밍 함수 내부에서 읽으면 File closed 에러 가능성)
         content = await attachFile_bin.read()
         with open(saved_file_path, "wb") as fp:
             fp.write(content)
@@ -78,29 +69,41 @@ async def upload_document(
         print(f"📂 [Upload] Start ingesting file: {final_filename} for room: {invokeId}")
 
         async def stream_progress():
-            try:
-                # 초기 진행률 전송
-                yield f"event: progress\ndata: {json.dumps({'percent': 0, 'message': '파일 업로드 및 저장 완료'}, ensure_ascii=False)}\n\n"
-                
-                # 진행률 콜백 함수
-                async def on_progress(percent: int, message: str):
-                    data = json.dumps({"percent": percent, "message": message}, ensure_ascii=False)
-                    yield f"event: progress\ndata: {data}\n\n"
+            queue = asyncio.Queue()
 
-                # 인덱싱 수행 (콜백 전달)
-                await rag_ingestion_service.ingest_file(
-                    final_filename, 
-                    invokeId, 
-                    saved_file_path, 
-                    on_progress=on_progress
-                )
-                
-                # 완료 이벤트 전송
-                yield f"event: done\ndata: {json.dumps({'message': '모든 인덱싱 작업이 완료되었습니다.'}, ensure_ascii=False)}\n\n"
-                
-            except Exception as e:
-                print(f"⚠️ [Upload Stream Error] {e}")
-                yield f"event: error\ndata: {json.dumps({'detail': str(e)}, ensure_ascii=False)}\n\n"
+            # 진행률 콜백 (큐에 넣음)
+            async def on_progress(percent: int, message: str):
+                print(f"🚀 [SSE] Queueing progress: {percent}% - {message}")
+                data = json.dumps({"percent": percent, "message": message}, ensure_ascii=False)
+                await queue.put(f"event: progress\ndata: {data}\n\n")
+
+            # 인덱싱 작업을 별도 태스크로 실행
+            async def run_ingestion():
+                try:
+                    await rag_ingestion_service.ingest_file(
+                        final_filename, 
+                        invokeId, 
+                        saved_file_path, 
+                        on_progress=on_progress
+                    )
+                    # 완료 이벤트
+                    await queue.put(f"event: done\ndata: {json.dumps({'message': '모든 인덱싱 작업이 완료되었습니다.'}, ensure_ascii=False)}\n\n")
+                except Exception as e:
+                    print(f"⚠️ [Upload Stream Error] {e}")
+                    await queue.put(f"event: error\ndata: {json.dumps({'detail': str(e)}, ensure_ascii=False)}\n\n")
+                finally:
+                    # 종료 신호
+                    await queue.put(None)
+
+            # 태스크 시작
+            task = asyncio.create_task(run_ingestion())
+
+            # 큐 소비 및 스트리밍
+            while True:
+                data = await queue.get()
+                if data is None:
+                    break
+                yield data
 
         return StreamingResponse(
             stream_progress(), 

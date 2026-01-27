@@ -2,27 +2,67 @@ import os
 import torch
 import numpy as np
 import json
+import logging
 from typing import List, Dict, Any, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from transformers import AutoTokenizer
+from pydantic_settings import BaseSettings
+import outlines
 from vllm import LLM, SamplingParams
-from pylate import models
+from outlines import Generator
+from pylate import models as pylate_models
+
+# 로깅 설정
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # ======================================== 
-# 설정
+# 설정 (Settings)
 # ======================================== 
-COLBERT_MODEL_NAME = "jinaai/jina-colbert-v2"
-QWEN_MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+class Settings(BaseSettings):
+    COLBERT_MODEL_NAME: str = "jinaai/jina-colbert-v2"
+    QWEN_MODEL_NAME: str = "Qwen/Qwen3-4B-Instruct-2507"
+    DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # vLLM 설정
+    GPU_MEMORY_UTILIZATION: float = 0.6
+    MAX_MODEL_LEN: int = 4096
+    ATTENTION_BACKEND: str = "FLASHINFER"
+    ENFORCE_EAGER: bool = True
+    
+    # 인코딩 설정
+    COLBERT_BATCH_SIZE_QUERY: int = 32
+    COLBERT_BATCH_SIZE_DOC: int = 128
 
-colbert_model: Optional[models.ColBERT] = None
-qwen_model: Optional[LLM] = None
-qwen_tokenizer = None
+settings = Settings()
+
+# 전역 변수 (모델 인스턴스)
+colbert_model: Optional[pylate_models.ColBERT] = None
+qwen_model = None
+graph_generator = None
+keyword_generator = None
 
 # ======================================== 
-# Request/Response 스키마
+# Pydantic 스키마 (Outlines용)
+# ======================================== 
+class Entity(BaseModel):
+    name: str
+    type: str
+    description: str
+
+class Relationship(BaseModel):
+    source: str
+    target: str
+    type: str
+    description: str
+
+class GraphSchema(BaseModel):
+    entities: List[Entity]
+    relationships: List[Relationship]
+
+# ======================================== 
+# API Request/Response 스키마
 # ======================================== 
 class EncodeRequest(BaseModel):
     texts: List[str]
@@ -38,106 +78,80 @@ class GraphExtractRequest(BaseModel):
     texts: List[str]
 
 # ======================================== 
-# 프롬프트 정의
+# 프롬프트 템플릿
 # ======================================== 
 KEYWORD_SYSTEM_PROMPT = """You are a keyword extraction assistant. Extract 5-10 key concepts, entities, or important terms from the given text. Return only comma-separated keywords in Korean. Do not include explanations."""
 
-KEYWORD_USER_TEMPLATE = """텍스트 본문에서 핵심 키워드 5~10개를 추출해주세요. 답변은 쉼표로 구분된 리스트만 포함해야 합니다.
+KEYWORD_USER_TEMPLATE = """다음 본문에서 핵심 키워드를 5~10개 정도 추출해줘. 한국어로만 출력하고 쉼표로 구분해줘.
 
 본문:
 {text}
 
 키워드:"""
 
-ENTITY_EXTRACTION_SYSTEM_PROMPT = "You are a knowledge graph extractor. Extract entities and their relationships from the given text."
+GRAPH_SYSTEM_PROMPT = """You are an expert at extracting entities and relationships from text to build a knowledge graph. 
+For the given text, extract all important entities and the relationships between them in JSON format."""
 
-ENTITY_EXTRACTION_USER_TEMPLATE = """주어진 텍스트에서 중요한 엔티티(Entity)와 그들 간의 관계(Relationship)를 추출하세요.
+GRAPH_USER_TEMPLATE = """다음 텍스트에서 지식 그래프 구성을 위한 엔티티와 관계를 추출해줘.
 
-## 추출 가이드라인
-1. 엔티티: 사람, 조직, 장소, 개념, 사건, 날짜 등 중요한 명사구.
-2. 관계: 엔티티 사이의 상호작용이나 속성을 나타내는 동사구.
-3. 형식: (주체) -[관계]-> (목적어)
-
-## 텍스트
+텍스트:
 {text}
 
-## 출력 형식 (JSON)
-{{ 
-  "entities": [
-    {{"name": "엔티티이름", "type": "유형", "description": "한줄설명"}}
-  ],
-  "relationships": [
-    {{"source": "주체", "target": "목적어", "type": "관계유형", "description": "관계설명"}}
-  ]
-}}"""
-
-# JSON 스키마 (vLLM guided decoding용)
-GRAPH_JSON_SCHEMA = { 
-    "type": "object",
-    "properties": {
-        "entities": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "type": {"type": "string"},
-                    "description": {"type": "string"}
-                },
-                "required": ["name", "type"]
-            }
-        },
-        "relationships": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "source": {"type": "string"},
-                    "target": {"type": "string"},
-                    "type": {"type": "string"},
-                    "description": {"type": "string"}
-                },
-                "required": ["source", "target", "type"]
-            }
-        }
-    },
-    "required": ["entities", "relationships"]
-}
+결과:"""
 
 # ======================================== 
-# 모델 로드
+# 모델 로드 함수
 # ======================================== 
 def load_colbert():
     global colbert_model
-    print(f"🚀 Loading Jina ColBERT v2 on {DEVICE}...")
-    colbert_model = models.ColBERT(
-        model_name_or_path=COLBERT_MODEL_NAME,
-        device=DEVICE,
-        trust_remote_code=True
-    )
-    print("✅ ColBERT loaded!")
+    logger.info(f"Loading Jina ColBERT v2 on {settings.DEVICE}...")
+    try:
+        colbert_model = pylate_models.ColBERT(
+            model_name_or_path=settings.COLBERT_MODEL_NAME,
+            device=settings.DEVICE,
+            trust_remote_code=True
+        )
+        logger.info("ColBERT loaded successfully!")
+    except Exception as e:
+        logger.error(f"Failed to load ColBERT: {e}")
 
-def load_qwen():
-    global qwen_model, qwen_tokenizer
-    print(f"🚀 Loading Qwen3-4B with vLLM on {DEVICE}...")
-    qwen_tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL_NAME, trust_remote_code=True)
-    qwen_model = LLM(
-        model=QWEN_MODEL_NAME,
-        gpu_memory_utilization=0.6,
-        trust_remote_code=True,
-        dtype="bfloat16",
-        max_model_len=4096
-    )
-    print("✅ Qwen3-4B loaded with vLLM!")
+def load_qwen_with_outlines():
+    global qwen_model, graph_generator, keyword_generator
+    logger.info(f"Loading Qwen3-4B with Outlines + vLLM({settings.ATTENTION_BACKEND}) on {settings.DEVICE}...")
+
+    try:
+        # vLLM 최적화 설정으로 모델 로드
+        llm = LLM(
+            model=settings.QWEN_MODEL_NAME,
+            dtype="bfloat16",
+            trust_remote_code=True,
+            gpu_memory_utilization=settings.GPU_MEMORY_UTILIZATION,
+            max_model_len=settings.MAX_MODEL_LEN,
+            attention_backend=settings.ATTENTION_BACKEND,
+            enforce_eager=settings.ENFORCE_EAGER,
+        )
+
+        # Outlines v1: vLLM offline wrapper
+        qwen_model = outlines.from_vllm_offline(llm)
+
+        # Generator 초기화
+        graph_generator = Generator(qwen_model, GraphSchema)  # 구조화된 JSON 응답용
+        keyword_generator = Generator(qwen_model)             # 일반 텍스트 응답용
+
+        logger.info("Qwen3-4B + Outlines Generator loaded successfully!")
+    except Exception as e:
+        logger.error(f"Failed to load Qwen/Outlines: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 앱 시작 시 모델 로드
     load_colbert()
-    load_qwen()
+    load_qwen_with_outlines()
     yield
-    print("Shutting down model server...")
+    # 앱 종료 시 정리 (필요한 경우)
+    logger.info("Shutting down model server...")
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(title="AI Model Server", lifespan=lifespan)
 
 # ======================================== 
 # API 엔드포인트
@@ -148,21 +162,27 @@ async def encode_texts(request: EncodeRequest):
         raise HTTPException(status_code=503, detail="ColBERT model not loaded")
     if not request.texts:
         return EncodeResponse(embeddings=[])
+    
     try:
+        batch_size = settings.COLBERT_BATCH_SIZE_QUERY if request.is_query else settings.COLBERT_BATCH_SIZE_DOC
         embeddings = colbert_model.encode(
             request.texts,
-            batch_size=32 if request.is_query else 128,
+            batch_size=batch_size,
             is_query=request.is_query,
-            show_progress_bar=True
+            show_progress_bar=False
         )
+        
+        # 임베딩 결과 변환 (numpy/torch -> list)
         if hasattr(embeddings, 'cpu'):
             embeddings_list = embeddings.cpu().numpy().tolist()
         elif isinstance(embeddings, np.ndarray):
             embeddings_list = embeddings.tolist()
         else:
             embeddings_list = embeddings
+            
         return EncodeResponse(embeddings=embeddings_list)
     except Exception as e:
+        logger.error(f"Encoding error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/encode/query")
@@ -177,76 +197,95 @@ async def encode_documents(request: EncodeRequest):
 
 @app.post("/extract_keywords")
 async def extract_keywords(request: KeywordRequest):
-    if qwen_model is None or qwen_tokenizer is None:
-        raise HTTPException(status_code=503, detail="Qwen model not loaded")
-    
+    if keyword_generator is None:
+        raise HTTPException(status_code=503, detail="Keyword generator not initialized")
+
+    if not request.texts:
+        return {"keywords": []}
+
+    # 프롬프트 구성
     prompts = []
     for text in request.texts:
-        truncated = text[:1500]
-        messages = [
-            {"role": "system", "content": KEYWORD_SYSTEM_PROMPT},
-            {"role": "user", "content": KEYWORD_USER_TEMPLATE.format(text=truncated)}
-        ]
-        prompt = qwen_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        prompts.append(prompt)
+        truncated = text[:1500]  # 컨텍스트 길이 제한
+        full_prompt = (
+            f"<|im_start|>system\n{KEYWORD_SYSTEM_PROMPT}<|im_end|>\n"
+            f"<|im_start|>user\n{KEYWORD_USER_TEMPLATE.format(text=truncated)}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        prompts.append(full_prompt)
 
-    sampling_params = SamplingParams(temperature=0, max_tokens=100)
-    outputs = qwen_model.generate(prompts, sampling_params)
-    return {"keywords": [o.outputs[0].text.strip().split('\n')[0] for o in outputs]}
+    try:
+        sampling_params = SamplingParams(
+            max_tokens=100,
+            temperature=0.0,
+            stop=["<|im_end|>", "\n"]
+        )
+
+        outputs = keyword_generator.batch(prompts, sampling_params=sampling_params)
+        keywords_list = [out.strip() for out in outputs]
+        return {"keywords": keywords_list}
+
+    except Exception as e:
+        logger.error(f"Keyword extraction error: {e}")
+        return {"keywords": [""] * len(request.texts)}
 
 @app.post("/extract_graph")
 async def extract_graph(request: GraphExtractRequest):
-    """지식 그래프용 엔티티 및 관계 추출 (경량 모델 활용)"""
-    if qwen_model is None or qwen_tokenizer is None:
-        raise HTTPException(status_code=503, detail="Qwen model not loaded")
-    
+    if graph_generator is None:
+        raise HTTPException(status_code=503, detail="Graph generator not initialized")
+
     if not request.texts:
         return {"results": []}
 
+    logger.info(f"Extracting graph from {len(request.texts)} texts...")
+
+    # 구조화된 데이터 추출을 위한 프롬프트 구성
     prompts = []
     for text in request.texts:
         truncated = text[:2000]
-        messages = [
-            {"role": "system", "content": ENTITY_EXTRACTION_SYSTEM_PROMPT},
-            {"role": "user", "content": ENTITY_EXTRACTION_USER_TEMPLATE.format(text=truncated)}
-        ]
-        prompt = qwen_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        prompts.append(prompt)
-
-    # Guided Decoding (JSON) 적용
-    sampling_params = SamplingParams(
-        temperature=0, 
-        max_tokens=2048,
-        guided_json=GRAPH_JSON_SCHEMA
-    )
+        full_prompt = (
+            f"<|im_start|>system\n{GRAPH_SYSTEM_PROMPT}<|im_end|>\n"
+            f"<|im_start|>user\n{GRAPH_USER_TEMPLATE.format(text=truncated)}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        prompts.append(full_prompt)
 
     try:
-        outputs = qwen_model.generate(prompts, sampling_params)
-        
+        sampling_params = SamplingParams(
+            max_tokens=1024,
+            temperature=0.0,
+        )
+
+        # Outlines를 사용한 구조화된 JSON 배치 생성
+        json_strings = graph_generator.batch(prompts, sampling_params=sampling_params)
+
         results = []
-        for output in outputs:
-            generated_text = output.outputs[0].text.strip()
+        for s in json_strings:
             try:
-                # JSON 파싱 시도
-                graph_data = json.loads(generated_text)
-                results.append(graph_data)
-            except json.JSONDecodeError:
-                print(f"❌ JSON Parsing failed for: {generated_text[:100]}...")
+                # Pydantic 모델로 검증 및 파싱
+                obj = GraphSchema.model_validate_json(s)
+                results.append(obj.model_dump())
+            except Exception as ve:
+                logger.warning(f"JSON validation failed: {ve}")
                 results.append({"entities": [], "relationships": []})
-        
+
         return {"results": results}
 
     except Exception as e:
-        print(f"❌ Graph extraction error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Graph extraction error: {e}")
+        return {"results": [{"entities": [], "relationships": []}] * len(request.texts)}
 
 @app.get("/health")
 async def health_check():
     return {
         "status": "healthy",
         "colbert_loaded": colbert_model is not None,
-        "qwen_loaded": qwen_model is not None,
-        "device": DEVICE
+        "outlines_loaded": graph_generator is not None,
+        "device": settings.DEVICE,
+        "config": {
+            "colbert_model": settings.COLBERT_MODEL_NAME,
+            "llm_model": settings.QWEN_MODEL_NAME
+        }
     }
 
 if __name__ == "__main__":

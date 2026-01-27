@@ -7,6 +7,7 @@ uploaded_files/
 __pycache__/
 libs
 debug_ai
+colbert_indexes
 *.whl
 *.mp3
 *.m4a

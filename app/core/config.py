@@ -2,8 +2,8 @@ from pydantic import BaseModel
 import os
 
 class Settings(BaseModel):
-    VLLM_BASE_URL: str = os.getenv("VLLM_BASE_URL", "http://198.13.252.3:58524")
-    VLLM_MODEL: str = os.getenv("VLLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B-AWQ")
+    VLLM_BASE_URL: str = os.getenv("VLLM_BASE_URL", "http://198.13.252.5:14125")
+    VLLM_MODEL: str = os.getenv("VLLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B")
 
     # 운영에서 흔히 필요한 제한값들 (MVP 기본)
     MAX_INPUT_CHARS: int = int(os.getenv("MAX_INPUT_CHARS", "20000"))
@@ -17,7 +17,7 @@ class Settings(BaseModel):
     # 이게 있어서 용량 폭발 걱정이 없는 거야!
     CHAT_HISTORY_TTL: int = 60 * 60 * 24 * 7
 
-    # 기억할 대화 턴 수 (질문+답변 한 쌍 기준 10개)
+    # 기억(참조)할 대화 턴 수 (질문+답변 한 쌍 기준 10개)
     MAX_HISTORY_COUNT: int = 5  # 기존 개수 제한
     MAX_HISTORY_CHARS: int = 2500
 
@@ -28,7 +28,7 @@ class Settings(BaseModel):
     STT_BASE_URL: str = os.getenv("STT_BASE_URL", "http://64.247.196.119:13850")
 
     # [모델 서버 설정] 임베딩, Reranker 등을 위한 외부 모델 서버 URL
-    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://198.13.252.5:11767")
+    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://198.13.252.5:19855")
 
     # [RAG 설정] 임베딩 차원 및 인덱스 이름
     EMBEDDING_DIMS: int = 1024
@@ -38,7 +38,7 @@ class Settings(BaseModel):
     COLBERT_TOP_K: int = 6  # ColBERT 검색 상위 개수
 
     # [Polaris 설정] Polaris 사용 여부 (False일 경우 pdf4llm/markitdown 등 대체재 사용)
-    POLARIS_ENABLED: bool = False
+    POLARIS_ENABLED: bool = True
 
     # [키워드 추출 서버 설정] 4B LLM 서버 (없으면 MODEL_SERVER_URL 사용)
     KEYWORD_SERVER_URL: str = os.getenv("KEYWORD_SERVER_URL", "")

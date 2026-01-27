@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import re
 from typing import List, Dict, Any, Optional
 from langchain_neo4j import Neo4jGraph
 from langchain_core.prompts import PromptTemplate
@@ -99,10 +100,13 @@ class LightRAGService:
                     
                     # 관계 쿼리
                     for rel in data.get("relationships", []):
+                        # 관계 타입 정제: 알파벳, 숫자, 언더바 외에는 모두 언더바로 치환
+                        safe_type = re.sub(r'[^A-Z0-9_]', '_', rel['type'].upper())
+                        
                         cypher = f"""
                         MATCH (a:Entity {{name: $source_node, invoke_id: $invoke_id}})
                         MATCH (b:Entity {{name: $target_node, invoke_id: $invoke_id}})
-                        MERGE (a)-[r:{rel['type'].upper().replace(' ', '_')}]->(b)
+                        MERGE (a)-[r:{safe_type}]->(b)
                         SET r.description = $desc, r.source = $source
                         """
                         all_queries.append((cypher, {

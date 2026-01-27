@@ -1,4 +1,5 @@
 import os
+import asyncio
 import torch
 import numpy as np
 import json
@@ -8,9 +9,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
-import outlines
 from vllm import LLM, SamplingParams
-from outlines import Generator
+from vllm.sampling_params import StructuredOutputsParams
 from pylate import models as pylate_models
 
 # 로깅 설정
@@ -26,10 +26,10 @@ class Settings(BaseSettings):
     DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
     
     # vLLM 설정
-    GPU_MEMORY_UTILIZATION: float = 0.6
-    MAX_MODEL_LEN: int = 4096
+    GPU_MEMORY_UTILIZATION: float = 0.7
+    MAX_MODEL_LEN: int = 32768
     ATTENTION_BACKEND: str = "FLASHINFER"
-    ENFORCE_EAGER: bool = True
+    ENFORCE_EAGER: bool = False
     
     # 인코딩 설정
     COLBERT_BATCH_SIZE_QUERY: int = 32
@@ -39,12 +39,11 @@ settings = Settings()
 
 # 전역 변수 (모델 인스턴스)
 colbert_model: Optional[pylate_models.ColBERT] = None
-qwen_model = None
-graph_generator = None
-keyword_generator = None
+qwen_llm: Optional[LLM] = None
+llm_lock: Optional[asyncio.Lock] = None
 
-# ======================================== 
-# Pydantic 스키마 (Outlines용)
+# ========================================
+# Pydantic 스키마 (Structured Output용)
 # ======================================== 
 class Entity(BaseModel):
     name: str
@@ -115,13 +114,12 @@ def load_colbert():
     except Exception as e:
         logger.error(f"Failed to load ColBERT: {e}")
 
-def load_qwen_with_outlines():
-    global qwen_model, graph_generator, keyword_generator
-    logger.info(f"Loading Qwen3-4B with Outlines + vLLM({settings.ATTENTION_BACKEND}) on {settings.DEVICE}...")
+def load_qwen():
+    global qwen_llm
+    logger.info(f"Loading Qwen3-4B with vLLM({settings.ATTENTION_BACKEND}) on {settings.DEVICE}...")
 
     try:
-        # vLLM 최적화 설정으로 모델 로드
-        llm = LLM(
+        qwen_llm = LLM(
             model=settings.QWEN_MODEL_NAME,
             dtype="bfloat16",
             trust_remote_code=True,
@@ -130,23 +128,17 @@ def load_qwen_with_outlines():
             attention_backend=settings.ATTENTION_BACKEND,
             enforce_eager=settings.ENFORCE_EAGER,
         )
-
-        # Outlines v1: vLLM offline wrapper
-        qwen_model = outlines.from_vllm_offline(llm)
-
-        # Generator 초기화
-        graph_generator = Generator(qwen_model, GraphSchema)  # 구조화된 JSON 응답용
-        keyword_generator = Generator(qwen_model)             # 일반 텍스트 응답용
-
-        logger.info("Qwen3-4B + Outlines Generator loaded successfully!")
+        logger.info("Qwen3-4B loaded successfully!")
     except Exception as e:
-        logger.error(f"Failed to load Qwen/Outlines: {e}")
+        logger.error(f"Failed to load Qwen: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global llm_lock
+    llm_lock = asyncio.Lock()
     # 앱 시작 시 모델 로드
     load_colbert()
-    load_qwen_with_outlines()
+    load_qwen()
     yield
     # 앱 종료 시 정리 (필요한 경우)
     logger.info("Shutting down model server...")
@@ -165,7 +157,9 @@ async def encode_texts(request: EncodeRequest):
     
     try:
         batch_size = settings.COLBERT_BATCH_SIZE_QUERY if request.is_query else settings.COLBERT_BATCH_SIZE_DOC
-        embeddings = colbert_model.encode(
+        # Use asyncio.to_thread to avoid blocking the event loop
+        embeddings = await asyncio.to_thread(
+            colbert_model.encode,
             request.texts,
             batch_size=batch_size,
             is_query=request.is_query,
@@ -197,8 +191,8 @@ async def encode_documents(request: EncodeRequest):
 
 @app.post("/extract_keywords")
 async def extract_keywords(request: KeywordRequest):
-    if keyword_generator is None:
-        raise HTTPException(status_code=503, detail="Keyword generator not initialized")
+    if qwen_llm is None:
+        raise HTTPException(status_code=503, detail="Qwen LLM not initialized")
 
     if not request.texts:
         return {"keywords": []}
@@ -206,7 +200,7 @@ async def extract_keywords(request: KeywordRequest):
     # 프롬프트 구성
     prompts = []
     for text in request.texts:
-        truncated = text[:1500]  # 컨텍스트 길이 제한
+        truncated = text[:10000]  # 1500 -> 10000 컨텍스트 길이 확장
         full_prompt = (
             f"<|im_start|>system\n{KEYWORD_SYSTEM_PROMPT}<|im_end|>\n"
             f"<|im_start|>user\n{KEYWORD_USER_TEMPLATE.format(text=truncated)}<|im_end|>\n"
@@ -221,8 +215,10 @@ async def extract_keywords(request: KeywordRequest):
             stop=["<|im_end|>", "\n"]
         )
 
-        outputs = keyword_generator.batch(prompts, sampling_params=sampling_params)
-        keywords_list = [out.strip() for out in outputs]
+        async with llm_lock:
+            outputs = await asyncio.to_thread(qwen_llm.generate, prompts, sampling_params)
+        
+        keywords_list = [output.outputs[0].text.strip() for output in outputs]
         return {"keywords": keywords_list}
 
     except Exception as e:
@@ -231,18 +227,26 @@ async def extract_keywords(request: KeywordRequest):
 
 @app.post("/extract_graph")
 async def extract_graph(request: GraphExtractRequest):
-    if graph_generator is None:
-        raise HTTPException(status_code=503, detail="Graph generator not initialized")
+    if qwen_llm is None:
+        raise HTTPException(status_code=503, detail="Qwen LLM not initialized")
 
     if not request.texts:
         return {"results": []}
 
-    logger.info(f"Extracting graph from {len(request.texts)} texts...")
+    import time
+    start_time = time.time()
+    
+    # 입력 정보 로깅
+    text_lengths = [len(t) for t in request.texts]
+    logger.info(f"🚀 [Graph] Extracting from {len(request.texts)} texts. Lengths: {text_lengths}")
+    if request.texts:
+        preview = request.texts[0][:100].replace("\n", " ")
+        logger.info(f"📝 [Graph] Preview: {preview}...")
 
     # 구조화된 데이터 추출을 위한 프롬프트 구성
     prompts = []
     for text in request.texts:
-        truncated = text[:2000]
+        truncated = text[:20000] # 2000 -> 20000 컨텍스트 길이 확장
         full_prompt = (
             f"<|im_start|>system\n{GRAPH_SYSTEM_PROMPT}<|im_end|>\n"
             f"<|im_start|>user\n{GRAPH_USER_TEMPLATE.format(text=truncated)}<|im_end|>\n"
@@ -251,25 +255,36 @@ async def extract_graph(request: GraphExtractRequest):
         prompts.append(full_prompt)
 
     try:
+        # Structured Output 복구
+        structured_params = StructuredOutputsParams(json=GraphSchema.model_json_schema())
         sampling_params = SamplingParams(
-            max_tokens=1024,
+            max_tokens=12288,
             temperature=0.0,
+            structured_outputs=structured_params
         )
 
-        # Outlines를 사용한 구조화된 JSON 배치 생성
-        json_strings = graph_generator.batch(prompts, sampling_params=sampling_params)
+        async with llm_lock:
+            outputs = await asyncio.to_thread(qwen_llm.generate, prompts, sampling_params)
 
         results = []
-        for s in json_strings:
+        for i, output in enumerate(outputs):
+            json_str = output.outputs[0].text
             try:
                 # Pydantic 모델로 검증 및 파싱
-                obj = GraphSchema.model_validate_json(s)
+                obj = GraphSchema.model_validate_json(json_str)
                 results.append(obj.model_dump())
             except Exception as ve:
-                logger.warning(f"JSON validation failed: {ve}")
+                logger.error(f"❌ [Graph] Validation failed for text index {i}: {ve}")
+                logger.error(f"📄 [Graph] Raw output: {json_str[:500]}")
                 results.append({"entities": [], "relationships": []})
 
+        duration = time.time() - start_time
+        logger.info(f"✅ [Graph] Completed {len(request.texts)} texts in {duration:.2f}s ({(duration/len(request.texts)):.2f}s/it)")
         return {"results": results}
+
+    except Exception as e:
+        logger.error(f"🔥 [Graph] Critical error: {e}")
+        return {"results": [{"entities": [], "relationships": []}] * len(request.texts)}
 
     except Exception as e:
         logger.error(f"Graph extraction error: {e}")
@@ -280,7 +295,7 @@ async def health_check():
     return {
         "status": "healthy",
         "colbert_loaded": colbert_model is not None,
-        "outlines_loaded": graph_generator is not None,
+        "qwen_loaded": qwen_llm is not None,
         "device": settings.DEVICE,
         "config": {
             "colbert_model": settings.COLBERT_MODEL_NAME,

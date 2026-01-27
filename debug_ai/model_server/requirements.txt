@@ -1,0 +1,21 @@
+# FastAPI 서버
+fastapi>=0.115.0
+uvicorn>=0.32.0
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+
+# vLLM (StructuredOutputsParams 사용을 위해 0.8.5+)
+vllm>=0.8.5
+
+# ColBERT 임베딩
+pylate>=1.1.0
+voyager>=2.0.9
+
+# ML 기본
+torch>=2.4.0
+numpy>=1.26.0
+transformers>=4.48.0
+
+# 유틸리티
+einops
+hf_transfer

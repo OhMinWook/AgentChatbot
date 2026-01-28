@@ -2,21 +2,28 @@
 fastapi
 uvicorn[standard]
 pydantic
-pydantic-settings  # 환경변수 관리를 위해 권장 (선택사항)
+python-multipart       # 파일 업로드(Form/File) 필수
 
-# 2. File Handling (필수 추가)
-python-multipart   # [중요] 사용자가 파일을 업로드하려면 이게 반드시 있어야 함!
+# 2. Networking & HTTP
+httpx                  # LLM/STT/Model 서버 통신
 
-# 3. Networking & Database
-httpx              # Unstructured API 호출용 (이미 있음)
-redis              # Vector DB 및 캐시용 (이미 있음)
+# 3. Database
+redis                  # 캐싱, 대화 히스토리, 청크 저장소
+neo4j                  # LightRAG용 Graph DB 드라이버
 
-# 4. LangChain Ecosystem (RAG 구현용)
-langchain
-langchain-community
-langchain-huggingface  # 임베딩 모델(BGE-M3) 로드용
-sentence-transformers  # HuggingFaceEmbeddings의 의존성
+# 4. LangChain / LangGraph
+langchain-core         # 메시지, 프롬프트, 문서 타입
+langchain-neo4j        # Neo4j 그래프 연동
+langgraph              # LangGraph 에이전트 워크플로우
 
-# 5. Utilities
-tiktoken           # 토큰 수를 계산해서 Chunking할 때 필요할 수 있음
-jinja2             # HWPX 문서 템플릿 처리용
+# 5. RAG & Search
+pylate                 # ColBERT + Voyager 로컬 인덱스 검색
+numpy                  # 벡터 연산
+
+# 6. Document Processing
+jinja2                 # HWPX 문서 템플릿 처리
+markitdown             # Office/텍스트 파일 → 마크다운 변환
+pdf4llm                # PDF → 마크다운 변환 (페이지 단위)
+
+# 7. Type Hints
+typing_extensions      # TypedDict 등 확장 타입

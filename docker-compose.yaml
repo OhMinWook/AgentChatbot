@@ -1,21 +1,71 @@
-version: '3.8'
-
 services:
-  # 1. 문서 파싱 서버 (기존 유지)
-  unstructured-api:
-    image: downloads.unstructured.io/unstructured-io/unstructured-api:latest
-    container_name: unstructured_api
+  # ── LLM Gateway (FastAPI) ──────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llm_gateway
     ports:
-      - "8001:8000"
+      - "8000:8000"
     environment:
-      - UNSTRUCTURED_API_KEY=
-    restart: on-failure
+      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://host.docker.internal:8080}
+      - VLLM_MODEL=${VLLM_MODEL:-LGAI-EXAONE/EXAONE-4.0-32B-AWQ}
+      - MODEL_SERVER_URL=${MODEL_SERVER_URL:-http://host.docker.internal:42412}
+      - STT_BASE_URL=${STT_BASE_URL:-http://host.docker.internal:13850}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USERNAME=${NEO4J_USERNAME:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
+      - UPLOAD_DIR=/data/uploaded_files
+    volumes:
+      - uploaded_files:/data/uploaded_files
+      - colbert_indexes:/app/colbert_indexes
+    depends_on:
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    restart: unless-stopped
 
-  # 2. Redis Stack (여기가 중요! 이미지 교체)
+  # ── Redis ──────────────────────────────────────────────────
   redis:
-    image: redis/redis-stack-server:latest  # alpine 아님! 검색 기능 포함된 버전
+    image: redis/redis-stack-server:latest
     container_name: otinus_redis
     ports:
       - "6379:6379"
     environment:
-      - REDIS_ARGS=--save 60 1 --loglevel warning # 데이터 저장 옵션
+      - REDIS_ARGS=--save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Neo4j (LightRAG Knowledge Graph) ──────────────────────
+  neo4j:
+    image: neo4j:5-community
+    container_name: otinus_neo4j
+    ports:
+      - "7474:7474"   # Browser UI
+      - "7687:7687"   # Bolt protocol
+    environment:
+      - NEO4J_AUTH=${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:-password}
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  neo4j_data:
+  uploaded_files:
+  colbert_indexes:

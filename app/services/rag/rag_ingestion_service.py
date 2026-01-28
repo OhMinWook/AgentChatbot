@@ -376,7 +376,21 @@ class RagIngestionService:
             try:
                 if on_progress:
                     await on_progress(30, "ColBERT 인덱싱 저장 중...")
-                await self._store_chunks_to_colbert(chunks, invoke_id)
+
+                # 실제 인덱싱을 별도 태스크로 실행하면서 4초마다 5%씩 진행률 표시
+                indexing_task = asyncio.create_task(
+                    self._store_chunks_to_colbert(chunks, invoke_id)
+                )
+                current_percent = 35
+                while not indexing_task.done() and current_percent <= 85:
+                    await asyncio.sleep(4)
+                    if indexing_task.done():
+                        break
+                    if on_progress:
+                        await on_progress(current_percent, "ColBERT 인덱싱 저장 중...")
+                    current_percent += 5
+
+                await indexing_task  # 예외 전파
                 logger.info(f"✅ [Ingestion] ColBERT 인덱싱 완료")
                 if on_progress:
                     await on_progress(90, "ColBERT 인덱싱 완료")

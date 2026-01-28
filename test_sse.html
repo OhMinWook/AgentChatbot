@@ -111,6 +111,7 @@
     <script>
         const logDiv = document.getElementById('log');
         let currentThreadId = null;
+        let streamingAnswerEl = null;
 
         function log(msg, type = '') {
             const div = document.createElement('div');
@@ -286,9 +287,17 @@
         }
 
         async function handleChatSSE(response) {
+            streamingAnswerEl = null;  // 스트리밍 시작 시 초기화
             await handleSSE(response, (data) => {
                 if (data.type === 'answer') {
-                    log(data.content, 'answer');
+                    // 첫 answer 청크이면 DOM 요소 생성, 이후는 append
+                    if (!streamingAnswerEl) {
+                        streamingAnswerEl = document.createElement('div');
+                        streamingAnswerEl.className = 'log-msg event-answer';
+                        logDiv.appendChild(streamingAnswerEl);
+                    }
+                    streamingAnswerEl.textContent += data.content;
+                    logDiv.scrollTop = logDiv.scrollHeight;
                 } else if (data.type === 'references') {
                     const refs = data.docs.map(d => `📄 ${d.source} (p.${d.page})`).join(', ');
                     log(`참고 문서: ${refs}`, 'references');

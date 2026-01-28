@@ -206,6 +206,9 @@ class LocalIndexService:
             doc_id = result.get("id", "")
             score = float(result.get("score", 0.0))
 
+            if score < 17.0:
+                continue
+
             key = self._get_redis_key(invoke_id, doc_id)
             doc_data = await r.hgetall(key)
 
@@ -223,7 +226,7 @@ class LocalIndexService:
                 metadata=metadata
             ))
 
-        print(f"✅ [LocalIndex] Found {len(results)} results")
+        print(f"✅ [LocalIndex] Found {len(results)} results (score >= 17.0)")
         return results
 
     async def search_batch(
@@ -269,6 +272,9 @@ class LocalIndexService:
                 doc_id = result.get("id", "")
                 score = float(result.get("score", 0.0))
 
+                if score < 17.0:
+                    continue
+
                 key = self._get_redis_key(invoke_id, doc_id)
                 doc_data = await r.hgetall(key)
 
@@ -288,7 +294,7 @@ class LocalIndexService:
 
             all_results.append(results)
 
-        print(f"✅ [LocalIndex] Batch search complete: {len(all_results)} queries")
+        print(f"✅ [LocalIndex] Batch search complete: {len(all_results)} queries (score >= 17.0)")
         return all_results
 
     async def delete_index(self, invoke_id: str) -> int:

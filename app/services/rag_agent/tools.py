@@ -140,12 +140,19 @@ class ColBERTSearchTool:
             references = []
             seen_contents = set()
 
+            is_first = True
             for r in search_results:
                 score = r.score
-                if score < 17.0:
-                    continue
-
                 content = r.content.strip()
+                if is_first:
+                    print(f"  🥇 [Q{idx+1}] score: {score:.2f} | 전체 내용:\n{content}")
+                    is_first = False
+                else:
+                    print(f"  📄 [Q{idx+1}] score: {score:.2f} | {content[:80]}...")
+
+                if score < 17.0:
+                    print(f"  ⛔ [Q{idx+1}] score {score:.2f} < 17.0, 제외")
+                    continue
                 source = r.metadata.get("source", "unknown")
                 page = r.metadata.get("page", 0)
 

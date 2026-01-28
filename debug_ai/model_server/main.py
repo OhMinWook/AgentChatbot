@@ -200,7 +200,7 @@ async def extract_keywords(request: KeywordRequest):
     # 프롬프트 구성
     prompts = []
     for text in request.texts:
-        truncated = text[:10000]  # 1500 -> 10000 컨텍스트 길이 확장
+        truncated = text[:1500]
         full_prompt = (
             f"<|im_start|>system\n{KEYWORD_SYSTEM_PROMPT}<|im_end|>\n"
             f"<|im_start|>user\n{KEYWORD_USER_TEMPLATE.format(text=truncated)}<|im_end|>\n"
@@ -246,7 +246,7 @@ async def extract_graph(request: GraphExtractRequest):
     # 구조화된 데이터 추출을 위한 프롬프트 구성
     prompts = []
     for text in request.texts:
-        truncated = text[:20000] # 2000 -> 20000 컨텍스트 길이 확장
+        truncated = text[:2000]
         full_prompt = (
             f"<|im_start|>system\n{GRAPH_SYSTEM_PROMPT}<|im_end|>\n"
             f"<|im_start|>user\n{GRAPH_USER_TEMPLATE.format(text=truncated)}<|im_end|>\n"
@@ -258,7 +258,7 @@ async def extract_graph(request: GraphExtractRequest):
         # Structured Output 복구
         structured_params = StructuredOutputsParams(json=GraphSchema.model_json_schema())
         sampling_params = SamplingParams(
-            max_tokens=12288,
+            max_tokens=1024,
             temperature=0.0,
             structured_outputs=structured_params
         )

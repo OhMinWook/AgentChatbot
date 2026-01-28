@@ -25,7 +25,7 @@ async def _stream_chat_response(
     async for chunk in generator:
         yield chunk
 
-        # 답변 누적 (히스토리 저장용)
+        # 답변 청크 누적 (히스토리 저장용)
         try:
             chunk_str = chunk.decode('utf-8').strip()
             if chunk_str.startswith("data:"):
@@ -33,7 +33,7 @@ async def _stream_chat_response(
                 if json_str:
                     data = json.loads(json_str)
                     if data.get("type") == "answer":
-                        full_answer = data.get("content", "")
+                        full_answer += data.get("content", "")
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
 
@@ -53,6 +53,9 @@ async def upload_document(
     """
     RAG 검색을 위한 문서 업로드 엔드포인트 (SSE 스트리밍)
     """
+    # 명확화 대기 중인 세션이 있으면 폐기
+    sse_graph_adapter.cancel_pending(invokeId)
+
     try:
         # 파일 저장 준비
         upload_dir = os.path.join(settings.UPLOAD_DIR, invokeId)
@@ -73,8 +76,8 @@ async def upload_document(
             # 진행률 콜백 (큐에 넣음)
             async def on_progress(percent: int, message: str):
                 print(f"🚀 [SSE] Queueing progress: {percent}% - {message}")
-                data = json.dumps({"percent": percent, "message": message}, ensure_ascii=False)
-                await queue.put(f"event: progress\ndata: {data}\n\n")
+                data = json.dumps({"type": "progress", "percent": percent, "message": message}, ensure_ascii=False)
+                await queue.put(f"data: {data}\n\n")
 
             # 인덱싱 작업을 별도 태스크로 실행
             async def run_ingestion():
@@ -86,10 +89,10 @@ async def upload_document(
                         on_progress=on_progress
                     )
                     # 완료 이벤트
-                    await queue.put(f"event: done\ndata: {json.dumps({'message': '모든 인덱싱 작업이 완료되었습니다.'}, ensure_ascii=False)}\n\n")
+                    await queue.put(f"data: {json.dumps({'type': 'done', 'message': '모든 인덱싱 작업이 완료되었습니다.'}, ensure_ascii=False)}\n\n")
                 except Exception as e:
                     print(f"⚠️ [Upload Stream Error] {e}")
-                    await queue.put(f"event: error\ndata: {json.dumps({'detail': str(e)}, ensure_ascii=False)}\n\n")
+                    await queue.put(f"data: {json.dumps({'type': 'error', 'detail': str(e)}, ensure_ascii=False)}\n\n")
                 finally:
                     # 종료 신호
                     await queue.put(None)
@@ -225,8 +228,8 @@ async def get_uploaded_files(invokeId: str):
             if os.path.isfile(full_path):
                 files_with_path.append((f, full_path))
         
-        # 수정 시간(getmtime) 기준으로 오름차순 정렬 (오래된 것 -> 최신)
-        files_with_path.sort(key=lambda x: os.path.getmtime(x[1]))
+        # 수정 시간(getmtime) 기준으로 내림차순 정렬 (최신 -> 오래된 것)
+        files_with_path.sort(key=lambda x: os.path.getmtime(x[1]), reverse=True)
         
         # 파일명만 추출하여 반환
         sorted_files = [f[0] for f in files_with_path]

@@ -4,7 +4,7 @@ LangGraph 노드 함수 정의
 
 import json
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, AsyncGenerator
 
 from langchain_core.messages import HumanMessage, AIMessage
 
@@ -99,12 +99,19 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
     """쿼리 분석 및 재작성 노드"""
     original_query = state.get("original_query", "")
     conversation_summary = state.get("conversation_summary", "")
+    filter_filename = state.get("filter_filename", None)
 
-    print(f"🔍 [Analyze] 쿼리 분석 시작: {original_query[:100]}...")
+    # private chat: 파일명을 쿼리에 포함하여 문맥 제공
+    query_for_analysis = original_query
+    if filter_filename:
+        file_label = filter_filename.rsplit(".", 1)[0]
+        query_for_analysis = f"[문서: {file_label}] {original_query}"
+
+    print(f"🔍 [Analyze] 쿼리 분석 시작: {query_for_analysis[:100]}...")
 
     prompt = ANALYZE_REWRITE_PROMPT.format(
         conversation_summary=conversation_summary or "(이전 대화 없음)",
-        user_query=original_query
+        user_query=query_for_analysis
     )
 
     # JSON 스키마로 구조화된 응답 요청
@@ -150,6 +157,8 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
         if clean_response.endswith("```"):
             clean_response = clean_response[:-3].strip()
 
+    clarification_count = state.get("clarification_count", 0)
+
     try:
         result = json.loads(clean_response)
         is_clear = result.get("is_clear", True)
@@ -158,6 +167,11 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
 
         print(f"🔍 [Analyze] is_clear: {is_clear}")
         print(f"🔍 [Analyze] rewritten_questions: {rewritten_questions}")
+
+        # 명확화를 이미 1회 요청했으면 불명확하더라도 강제 진행
+        if not is_clear and clarification_count >= 2:
+            print(f"🔍 [Analyze] 명확화 횟수 초과 ({clarification_count}회), 강제 진행")
+            is_clear = True
 
         if not rewritten_questions:
             rewritten_questions = [original_query]
@@ -168,12 +182,18 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
         rewritten_questions = [original_query]
         clarification_message = ""
 
-    return {
+    update = {
         "question_is_clear": is_clear,
         "rewritten_questions": rewritten_questions,
         "clarification_message": clarification_message if not is_clear else None,
-        "awaiting_human_input": not is_clear  # is_clear=False면 human input 대기
+        "awaiting_human_input": not is_clear,
     }
+
+    # 명확화 요청 시 카운트 증가
+    if not is_clear:
+        update["clarification_count"] = clarification_count + 1
+
+    return update
 
 
 async def human_input_node(state: MainState) -> Dict[str, Any]:
@@ -209,35 +229,66 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
 
     # 1. ColBERT 배치 검색 (로컬 Voyager 인덱스)
     search_tool = create_search_tool(invoke_id)
-    
-    # 2. LightRAG 검색 (병렬 실행을 위해 태스크 생성)
-    # 각 질문에 대해 LightRAG 검색 수행
-    async def search_lightrag(q):
-        try:
-            # filter_filename 전달
-            return await lightrag_service.search(q, invoke_id, filename=filter_filename)
-        except Exception as e:
-            logger.error(f"LightRAG search error: {e}")
-            return ""
-
-    # ColBERT와 LightRAG 검색 병렬 실행
-    # filter_filename 전달
     colbert_task = search_tool.search_batch(questions, filter_filename=filter_filename)
-    lightrag_tasks = [search_lightrag(q) for q in questions]
-    
-    # 모든 검색 결과 대기
-    results = await asyncio.gather(colbert_task, *lightrag_tasks)
-    
-    colbert_results = results[0]
-    lightrag_results = results[1:]  # 질문 개수만큼의 LightRAG 결과 리스트
 
-    # 3. 답변 생성
-    async def generate_answer(idx: int, question: str, col_res: Dict, lightrag_ctx: str):
+    # 2. LightRAG 검색 (open chat에서만 사용, private chat은 ColBERT만 사용)
+    if not filter_filename:
+        async def search_lightrag(q):
+            try:
+                return await lightrag_service.search(q, invoke_id)
+            except Exception as e:
+                logger.error(f"LightRAG search error: {e}")
+                return ""
+
+        lightrag_tasks = [search_lightrag(q) for q in questions]
+        results = await asyncio.gather(colbert_task, *lightrag_tasks)
+        colbert_results = results[0]
+        lightrag_results = results[1:]
+    else:
+        colbert_results = await colbert_task
+        lightrag_results = [""] * len(questions)
+
+    # 3. 프롬프트 구성 + 답변 생성
+    def build_prompt(question: str, col_res: Dict, lightrag_ctx: str) -> str | None:
+        """검색 결과로부터 LLM 프롬프트를 구성한다. 결과가 없으면 None."""
         colbert_context = col_res.get("context", "")
-        references = col_res.get("references", [])
-
-        # 두 검색 결과가 모두 없으면 실패 처리
         if not colbert_context and not lightrag_ctx:
+            return None
+        if lightrag_ctx:
+            return CROSS_VALIDATION_PROMPT.format(
+                colbert_context=colbert_context or "(ColBERT 검색 결과 없음)",
+                lightrag_context=lightrag_ctx,
+                question=question
+            )
+        return AGENT_PROMPT.format(context=colbert_context, question=question)
+
+    single_question = len(questions) == 1
+
+    if single_question:
+        # 단일 질문: LLM 호출을 하지 않고 프롬프트만 저장 → SSE adapter에서 스트리밍
+        col_res = colbert_results[0]
+        prompt = build_prompt(questions[0], col_res, lightrag_results[0])
+
+        if prompt is None:
+            no_result_msg = f"'{questions[0]}'에 대한 관련 문서를 찾지 못했습니다."
+            all_answers = [{"question": questions[0], "answer": no_result_msg, "sources": [], "prompt": None}]
+        else:
+            all_answers = [{
+                "question": questions[0],
+                "answer": "",  # 스트리밍에서 생성될 예정
+                "sources": col_res.get("references", []),
+                "prompt": prompt
+            }]
+
+        print(f"✅ [Process] 단일 질문 - 스트리밍 준비 완료")
+        return {"agent_answers": all_answers}
+
+    # 복수 질문: 각각 LLM 호출 (통합 시 필요)
+    async def generate_answer(idx: int, question: str, col_res: Dict, lightrag_ctx: str):
+        references = col_res.get("references", [])
+        prompt = build_prompt(question, col_res, lightrag_ctx)
+
+        if prompt is None:
             return {
                 "idx": idx,
                 "question": question,
@@ -245,31 +296,11 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
                 "sources": []
             }
 
-        # LightRAG 결과가 있으면 교차 검증 프롬프트 사용
-        if lightrag_ctx:
-            prompt = CROSS_VALIDATION_PROMPT.format(
-                colbert_context=colbert_context or "(ColBERT 검색 결과 없음)",
-                lightrag_context=lightrag_ctx,
-                question=question
-            )
-        else:
-            # ColBERT 결과만 있으면 기존 프롬프트 사용
-            prompt = AGENT_PROMPT.format(
-                context=colbert_context,
-                question=question
-            )
-
         answer = await _call_llm([{"role": "user", "content": prompt}], max_tokens=settings.DEFAULT_MAX_TOKENS)
-
-        return {
-            "idx": idx,
-            "question": question,
-            "answer": answer,
-            "sources": references
-        }
+        return {"idx": idx, "question": question, "answer": answer, "sources": references}
 
     tasks = [
-        generate_answer(idx, questions[idx], colbert_results[idx], lightrag_results[idx]) 
+        generate_answer(idx, questions[idx], colbert_results[idx], lightrag_results[idx])
         for idx in range(len(questions))
     ]
 
@@ -290,23 +321,87 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
 
 
 async def aggregate_node(state: MainState) -> Dict[str, Any]:
-    """답변 통합 노드"""
+    """답변 통합 노드 - LLM 직접 호출 대신 streaming_payload를 저장"""
     original_query = state.get("original_query", "")
     agent_answers = state.get("agent_answers", [])
 
     if not agent_answers:
-        return {"messages": [AIMessage(content="관련 정보를 찾지 못했습니다.")]}
+        return {
+            "messages": [AIMessage(content="관련 정보를 찾지 못했습니다.")],
+            "streaming_payload": {"precomputed": True, "content": "관련 정보를 찾지 못했습니다."}
+        }
 
     if len(agent_answers) == 1:
         answer = agent_answers[0]
-        return {"messages": [AIMessage(content=answer.get("answer", ""))]}
+        prompt = answer.get("prompt")
+        if prompt:
+            # 단일 질문 + 프롬프트 있음 → vLLM 스트리밍
+            logger.info("[Aggregate] 단일 답변 스트리밍 준비")
+            return {
+                "messages": [AIMessage(content="")],
+                "streaming_payload": {
+                    "precomputed": False,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": settings.DEFAULT_MAX_TOKENS
+                }
+            }
+        # 프롬프트 없음 (검색 결과 없음 등) → 이미 완성된 텍스트
+        answer_text = answer.get("answer", "")
+        return {
+            "messages": [AIMessage(content=answer_text)],
+            "streaming_payload": {"precomputed": True, "content": answer_text}
+        }
 
+    # 복수 답변: LLM 통합이 필요 → 호출 정보만 저장
     answers_text = ""
     for i, ans in enumerate(agent_answers):
         answers_text += f"\n### 답변 {i+1}\n{ans.get('answer', '')}\n"
 
     prompt = AGGREGATE_PROMPT.format(original_query=original_query, agent_answers=answers_text)
-    final_answer = await _call_llm([{"role": "user", "content": prompt}], max_tokens=settings.DEFAULT_MAX_TOKENS)
+    messages = [{"role": "user", "content": prompt}]
 
-    logger.info(f"[Aggregate] 통합 답변 생성 완료")
-    return {"messages": [AIMessage(content=final_answer)]}
+    logger.info(f"[Aggregate] 복수 답변 통합 스트리밍 준비")
+    return {
+        "messages": [AIMessage(content="")],  # placeholder (스트리밍 후 갱신 불필요)
+        "streaming_payload": {
+            "precomputed": False,
+            "messages": messages,
+            "max_tokens": settings.DEFAULT_MAX_TOKENS
+        }
+    }
+
+
+async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 2048) -> AsyncGenerator[str, None]:
+    """vLLM SSE 스트리밍 응답을 토큰 단위로 yield하는 async generator"""
+    payload = {
+        "model": settings.VLLM_MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0
+    }
+
+    try:
+        stream = await llm_client.chat_completions_stream(payload)
+        buffer = ""
+        async for raw_chunk in stream:
+            buffer += raw_chunk.decode("utf-8", errors="replace")
+            # SSE 라인 단위로 파싱
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    return
+                try:
+                    data = json.loads(data_str)
+                    delta = data.get("choices", [{}])[0].get("delta", {})
+                    token = delta.get("content")
+                    if token:
+                        yield token
+                except json.JSONDecodeError:
+                    continue
+    except Exception as e:
+        logger.error(f"stream_llm_tokens error: {e}")
+        raise

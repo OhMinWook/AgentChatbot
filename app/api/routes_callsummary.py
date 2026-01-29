@@ -1,23 +1,16 @@
 """통화 요약 API - SSE 기반 실시간 진행률 제공"""
-import os
-import json
 import time
 from fastapi import APIRouter, File, UploadFile, HTTPException
-from fastapi.responses import StreamingResponse
 from typing import AsyncGenerator
 
-from app.core.config import settings
 from app.services.clients.stt_client import stt_client
 from app.services.clients.llm_client import llm_client
 from app.services.prompt_builders.callsummary_prompt_builder import callsummary_prompt_builder
 from app.schemas.summary_job import SummaryStage, ProgressEvent, SummaryResult
+from app.services.utils.sse_utils import create_sse_message, create_sse_response
+from app.services.utils.file_utils import save_upload_file
 
 router = APIRouter()
-
-
-def create_sse_message(event: str, data: dict) -> str:
-    """SSE 형식의 메시지 생성"""
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 @router.post("/call-summary/{invoke_id}", summary="통화 요약 (SSE 실시간 진행률)")
@@ -45,22 +38,16 @@ async def summarize_call(
                 message="오디오 파일 수신 중..."
             ).model_dump())
 
-            # 저장 디렉토리 생성
-            upload_dir = os.path.join(settings.UPLOAD_DIR, "call_summary", invoke_id)
-            os.makedirs(upload_dir, exist_ok=True)
-
-            # 파일 저장
-            filename = audio.filename or "audio.wav"
-            saved_path = os.path.join(upload_dir, filename)
-
-            content = await audio.read()
-            with open(saved_path, "wb") as f:
-                f.write(content)
+            # 파일 저장 (Path Traversal 방지 포함)
+            saved_path, _ = await save_upload_file(
+                audio, "call_summary", invoke_id,
+                default_filename="audio.wav"
+            )
 
             yield create_sse_message("progress", ProgressEvent(
                 percent=10,
                 stage=SummaryStage.RECEIVING,
-                message=f"파일 저장 완료: {filename}"
+                message=f"파일 저장 완료: {audio.filename or 'audio.wav'}"
             ).model_dump())
 
             # ========== 2. STT 처리 (10% → 50%) ==========
@@ -103,7 +90,7 @@ async def summarize_call(
             llm_payload = callsummary_prompt_builder.build_summary_payload(transcript)
             llm_response = await llm_client.chat_completions(llm_payload)
 
-            summary = llm_response['choices'][0]['message']['content']
+            summary = llm_client.extract_content(llm_response)
 
             yield create_sse_message("progress", ProgressEvent(
                 percent=95,
@@ -137,15 +124,7 @@ async def summarize_call(
             ).model_dump())
             yield create_sse_message("error", {"detail": str(e)})
 
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"  # nginx 버퍼링 비활성화
-        }
-    )
+    return create_sse_response(event_stream())
 
 
 @router.post("/call-summary-sync/{invoke_id}", summary="통화 요약 (동기 방식)")
@@ -160,16 +139,11 @@ async def summarize_call_sync(
     start_time = time.time()
 
     try:
-        # 1. 파일 저장
-        upload_dir = os.path.join(settings.UPLOAD_DIR, "call_summary", invoke_id)
-        os.makedirs(upload_dir, exist_ok=True)
-
-        filename = audio.filename or "audio.wav"
-        saved_path = os.path.join(upload_dir, filename)
-
-        content = await audio.read()
-        with open(saved_path, "wb") as f:
-            f.write(content)
+        # 1. 파일 저장 (Path Traversal 방지)
+        saved_path, _ = await save_upload_file(
+            audio, "call_summary", invoke_id,
+            default_filename="audio.wav"
+        )
 
         # 2. STT
         transcript = await stt_client.transcribe(saved_path)
@@ -179,7 +153,7 @@ async def summarize_call_sync(
         # 3. LLM 요약
         llm_payload = callsummary_prompt_builder.build_summary_payload(transcript)
         llm_response = await llm_client.chat_completions(llm_payload)
-        summary = llm_response['choices'][0]['message']['content']
+        summary = llm_client.extract_content(llm_response)
 
         # 4. 결과 반환
         duration = time.time() - start_time
@@ -220,7 +194,7 @@ async def summarize_call_debug(
         # 2. LLM 요약 (STT 건너뜀)
         llm_payload = callsummary_prompt_builder.build_summary_payload(transcript)
         llm_response = await llm_client.chat_completions(llm_payload)
-        summary = llm_response['choices'][0]['message']['content']
+        summary = llm_client.extract_content(llm_response)
 
         # 3. 결과 반환
         duration = time.time() - start_time

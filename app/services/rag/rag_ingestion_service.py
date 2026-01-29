@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import hashlib
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
 # Polaris 비활성화 시 사용할 대체 라이브러리들
 try:
@@ -107,16 +107,16 @@ class RagIngestionService:
         if not raw_chunks:
             return []
 
-        print(f"📦 [Chunking] {file_name}: {len(raw_chunks)}개 청크 생성")
+        logger.info(f"[Chunking] {file_name}: {len(raw_chunks)}개 청크 생성")
 
         # 3. 키워드 추출 (배치)
         chunk_texts = [c["text"] for c in raw_chunks]
 
         try:
             keywords_list = await model_server_client.extract_keywords_batch(chunk_texts)
-            print(f"🏷️ [Keywords] {len(keywords_list)}개 키워드 추출 완료")
+            logger.info(f"[Keywords] {len(keywords_list)}개 키워드 추출 완료")
         except Exception as e:
-            print(f"⚠️ [Keywords] 키워드 추출 실패, 빈 키워드 사용: {e}")
+            logger.warning(f"[Keywords] 키워드 추출 실패, 빈 키워드 사용: {e}")
             keywords_list = [""] * len(raw_chunks)
 
         # 4. 최종 청크 포맷팅
@@ -165,7 +165,7 @@ class RagIngestionService:
                     markdown_parts.append(f"\n--- Page {real_page_num} ---\n{content_text.strip()}")
 
             full_markdown = "\n".join(markdown_parts)
-            print(f"📄 [PDF] {display_name}: {len(full_markdown)}자, {len(markdown_parts)}페이지")
+            logger.info(f"[PDF] {display_name}: {len(full_markdown)}자, {len(markdown_parts)}페이지")
             return full_markdown
         except Exception as e:
             logger.exception(f"pdf4llm 변환 중 예외 발생: {e}")
@@ -292,7 +292,7 @@ class RagIngestionService:
             await on_progress(5, "문서 내용 추출 중...")
 
         if settings.POLARIS_ENABLED:
-            print(f"🔄 [Ingestion] Polaris 엔진 사용")
+            logger.info("[Ingestion] Polaris 엔진 사용")
             with tempfile.TemporaryDirectory() as temp_output_dir:
                 try:
                     polaris_data = await asyncio.to_thread(
@@ -301,19 +301,19 @@ class RagIngestionService:
                     if polaris_data:
                         parser = PolarisJsonParser(polaris_data)
                         markdown_content = parser.parse_to_markdown()
-                        print(f"📄 [Polaris] {display_name}: {len(markdown_content)}자")
+                        logger.info(f"[Polaris] {display_name}: {len(markdown_content)}자")
                     else:
-                        print("❌ [Ingestion] Polaris 변환 실패")
+                        logger.error("[Ingestion] Polaris 변환 실패")
                         return
                 except Exception as e:
-                    print(f"❌ [Ingestion] Polaris 오류: {e}")
+                    logger.error(f"[Ingestion] Polaris 오류: {e}")
                     return
         else:
-            print(f"🔄 [Ingestion] 확장자: '{ext_to_use}' (파일명: {display_name})")
+            logger.info(f"[Ingestion] 확장자: '{ext_to_use}' (파일명: {display_name})")
 
             # 1. HWP/HWPX 파일 처리
             if ext_to_use in ['.hwp', '.hwpx']:
-                print(f"📄 [Ingestion] 한글 문서 → PDF 변환 → 마크다운 추출")
+                logger.info("[Ingestion] 한글 문서 -> PDF 변환 -> 마크다운 추출")
                 with tempfile.TemporaryDirectory() as temp_pdf_dir:
                     converted_pdf = await asyncio.to_thread(
                         self._convert_hwp_to_pdf_with_win32com, file_path, temp_pdf_dir
@@ -323,21 +323,21 @@ class RagIngestionService:
                             self._process_pdf_with_pdf4llm, converted_pdf, display_name, invoke_id
                         )
                     else:
-                        print("❌ [Ingestion] HWP → PDF 변환 실패")
+                        logger.error("[Ingestion] HWP -> PDF 변환 실패")
                         return
 
             # 2. PDF 파일
             elif ext_to_use == '.pdf':
-                print(f"📄 [Ingestion] PDF → 마크다운 추출")
+                logger.info("[Ingestion] PDF -> 마크다운 추출")
                 markdown_content = await asyncio.to_thread(
                     self._process_pdf_with_pdf4llm, file_path, display_name, invoke_id
                 )
 
             # 3. 기타 문서 (MarkItDown)
             else:
-                print(f"📄 [Ingestion] 일반 문서 → MarkItDown 변환")
+                logger.info("[Ingestion] 일반 문서 -> MarkItDown 변환")
                 if self._markitdown is None:
-                    print("❌ [Ingestion] MarkItDown 미설치")
+                    logger.error("[Ingestion] MarkItDown 미설치")
                     return
 
                 try:
@@ -345,7 +345,7 @@ class RagIngestionService:
                     if result and result.text_content:
                         markdown_content = result.text_content
                 except Exception as e:
-                    print(f"❌ [Ingestion] MarkItDown 오류: {e}")
+                    logger.error(f"[Ingestion] MarkItDown 오류: {e}")
                     return
         
         if on_progress:
@@ -353,7 +353,7 @@ class RagIngestionService:
 
         # 최종 체크
         if not markdown_content:
-            print("❌ [Ingestion] 마크다운 없음")
+            logger.error("[Ingestion] 마크다운 없음")
             return
 
         # === 2. 청킹 및 키워드 추출 (10% -> 20%) ===
@@ -364,7 +364,7 @@ class RagIngestionService:
         chunks = await self._create_chunks_with_keywords(markdown_content, display_name)
 
         if not chunks:
-            print("❌ [Ingestion] 청크 생성 실패")
+            logger.error("[Ingestion] 청크 생성 실패")
             return
             
         if on_progress:
@@ -422,7 +422,7 @@ class RagIngestionService:
         if on_progress:
             await on_progress(100, "모든 인덱싱 작업 완료!")
             
-        print(f"🎉 [Ingestion] {file_name} 완료 ({len(chunks)}개 청크)")
+        logger.info(f"[Ingestion] {file_name} 완료 ({len(chunks)}개 청크)")
 
 
 # 싱글톤 인스턴스

@@ -48,4 +48,12 @@ class Settings(BaseModel):
     NEO4J_USERNAME: str = os.getenv("NEO4J_USERNAME", "neo4j")
     NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "password")  # 초기 비밀번호 (변경 필요시 수정)
 
+    # [타임아웃 설정] 각 클라이언트 요청 타임아웃 (초)
+    LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "90"))
+    STT_TIMEOUT: float = float(os.getenv("STT_TIMEOUT", "300"))
+    MODEL_SERVER_TIMEOUT: float = float(os.getenv("MODEL_SERVER_TIMEOUT", "600"))
+    MODEL_SERVER_KEYWORD_TIMEOUT: float = float(os.getenv("MODEL_SERVER_KEYWORD_TIMEOUT", "120"))
+    MODEL_SERVER_GRAPH_TIMEOUT: float = float(os.getenv("MODEL_SERVER_GRAPH_TIMEOUT", "300"))
+    MODEL_SERVER_HEALTH_TIMEOUT: float = float(os.getenv("MODEL_SERVER_HEALTH_TIMEOUT", "10"))
+
 settings = Settings()

@@ -1,8 +1,12 @@
-from fastapi import APIRouter, HTTPException, Body, Form, Query
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
-from typing import Dict, Any, Optional
 import json
+import logging
 import os
+from typing import Dict, Any, Optional
+
+from fastapi import APIRouter, HTTPException, Form
+from fastapi.responses import StreamingResponse, JSONResponse
+
+logger = logging.getLogger(__name__)
 
 from app.services.documents.document_automater_service import document_automater_service
 from app.services.utils.download_service import download_service
@@ -66,7 +70,7 @@ async def generate_hwpx_document_api(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        print(f"HWPX 문서 생성 중 오류 발생: {e}")
+        logger.error(f"[HWPX Generation Error] {e}")
         raise HTTPException(status_code=500, detail=f"서버 내부 오류: {e}")
 
 

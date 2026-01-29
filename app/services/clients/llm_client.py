@@ -1,7 +1,10 @@
 ## 여기서는 LLM server와 통신을 하는 곳입니다. LLM server에게 직접 메세지를 보내는 소통 창구입니다.
+import logging
 import httpx
 from typing import AsyncGenerator
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -21,7 +24,7 @@ class LLMClient:
     def client(self) -> httpx.AsyncClient:
         """일반 요청용 클라이언트 (lazy initialization)"""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=90.0)
+            self._client = httpx.AsyncClient(timeout=settings.LLM_TIMEOUT)
         return self._client
 
     @property
@@ -40,29 +43,53 @@ class LLMClient:
             await self._stream_client.aclose()
             self._stream_client = None
 
-    async def chat_completions(self, payload: dict) -> dict:
+    @staticmethod
+    def extract_content(response: dict) -> str:
+        """LLM 응답에서 content를 안전하게 추출"""
+        try:
+            return response["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            logger.error(f"LLM 응답 파싱 실패: {e}, response={response}")
+            raise ValueError(f"LLM 응답 형식 오류: {e}")
+
+    async def chat_completions(self, payload: dict, max_retries: int = 1) -> dict:
         """
         일반 대화 요청 (Non-streaming)
+        :param payload: LLM 요청 payload
+        :param max_retries: 실패 시 재시도 횟수 (기본 1회)
         :return: 파싱된 JSON dict (Response 객체 아님)
         """
         url = f"{self.base_url}/v1/chat/completions"
+        last_error = None
 
-        try:
-            response = await self.client.post(url, json=payload, headers=self.headers)
-            response.raise_for_status()  # 4xx, 5xx 에러 시 즉시 예외 발생
-            return response.json()  # 받는 쪽 편하라고 아예 JSON으로 까서 리턴
+        for attempt in range(max_retries + 1):
+            try:
+                response = await self.client.post(url, json=payload, headers=self.headers)
+                response.raise_for_status()
+                return response.json()
 
-        except httpx.HTTPStatusError as e:
-            # vLLM이 뱉은 에러 메시지를 로그로 남기거나 확인하기 좋음
-            print(f"LLM Server Error: {e.response.text}")
-            raise e
-        except httpx.RequestError as e:
-            print(f"LLM Connection Error: {e}")
-            raise e
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                logger.warning(f"LLM Server Error (attempt {attempt + 1}/{max_retries + 1}): {e.response.text}")
+                if attempt < max_retries:
+                    logger.info("Retrying LLM request...")
+                    continue
+            except httpx.RequestError as e:
+                last_error = e
+                logger.warning(f"LLM Connection Error (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                if attempt < max_retries:
+                    logger.info("Retrying LLM request...")
+                    continue
 
-    async def chat_completions_stream(self, payload: dict) -> AsyncGenerator[bytes, None]:
+        # 모든 재시도 실패
+        logger.error(f"LLM request failed after {max_retries + 1} attempts")
+        raise last_error
+
+    async def chat_completions_stream(self, payload: dict, max_retries: int = 1) -> AsyncGenerator[bytes, None]:
         """
         vLLM 스트리밍 요청 (SSE)
+        :param payload: LLM 요청 payload
+        :param max_retries: 연결 실패 시 재시도 횟수 (기본 1회)
         :return: 바이트 스트림 제너레이터
         """
         url = f"{self.base_url}/v1/chat/completions"
@@ -70,13 +97,33 @@ class LLMClient:
         # 스트리밍을 켜달라는 옵션을 강제로 주입 (실수 방지)
         payload["stream"] = True
 
-        try:
-            req = self.stream_client.build_request("POST", url, json=payload, headers=self.headers)
-            r = await self.stream_client.send(req, stream=True)
-            r.raise_for_status()
+        last_error = None
+        r = None
 
-        except Exception as e:
-            raise e
+        # 연결 단계에서만 재시도
+        for attempt in range(max_retries + 1):
+            try:
+                req = self.stream_client.build_request("POST", url, json=payload, headers=self.headers)
+                r = await self.stream_client.send(req, stream=True)
+                r.raise_for_status()
+                break  # 연결 성공
+
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                logger.warning(f"LLM Stream Server Error (attempt {attempt + 1}/{max_retries + 1}): {e.response.text}")
+                if attempt < max_retries:
+                    logger.info("Retrying LLM stream request...")
+                    continue
+            except httpx.RequestError as e:
+                last_error = e
+                logger.warning(f"LLM Stream Connection Error (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                if attempt < max_retries:
+                    logger.info("Retrying LLM stream request...")
+                    continue
+
+        if r is None:
+            logger.error(f"LLM stream request failed after {max_retries + 1} attempts")
+            raise last_error
 
         # 내부 함수 정의 (Closure)
         async def gen():
@@ -86,7 +133,7 @@ class LLMClient:
                 async for chunk in r.aiter_bytes():
                     yield chunk
             except Exception as stream_err:
-                print(f"Streaming interrupted: {stream_err}")
+                logger.warning(f"Streaming interrupted: {stream_err}")
                 raise stream_err
             finally:
                 # 스트리밍이 끝나거나 중간에 끊겨도 응답만 닫음 (클라이언트는 재사용)

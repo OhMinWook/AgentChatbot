@@ -103,3 +103,38 @@ def convert_csv_to_dialogue(csv_content: bytes) -> str:
 
     flush_message()
     return '\n'.join(dialogue_lines)
+
+
+def split_dialogue_by_date(csv_content: bytes) -> list[dict[str, str]]:
+    """
+    CSV 파일을 대화록으로 변환한 뒤, 날짜별로 분리하여 반환합니다.
+
+    :param csv_content: CSV 파일의 바이트 내용
+    :return: [{"date": "2025-01-15", "text": "대화 내용..."}, ...] 형태의 리스트
+    """
+    dialogue_text = convert_csv_to_dialogue(csv_content)
+
+    result = []
+    current_date = None
+    current_lines = []
+
+    for line in dialogue_text.split('\n'):
+        match = re.match(r'^={5}\s+(\S+)\s+={5}$', line)
+        if match:
+            if current_date is not None and current_lines:
+                result.append({
+                    "date": current_date,
+                    "text": '\n'.join(current_lines).strip()
+                })
+            current_date = match.group(1)
+            current_lines = []
+        else:
+            current_lines.append(line)
+
+    if current_date is not None and current_lines:
+        result.append({
+            "date": current_date,
+            "text": '\n'.join(current_lines).strip()
+        })
+
+    return result

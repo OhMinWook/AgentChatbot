@@ -1,12 +1,17 @@
 import os
 import json
 import asyncio
+import logging
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Form, File, UploadFile
-from fastapi.responses import StreamingResponse
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 from app.services.utils.memory_service import memory_service
+from app.services.utils.path_validator import safe_join
+from app.services.utils.file_utils import save_upload_file
+from app.services.utils.sse_utils import create_sse_data, create_sse_response
 from app.services.rag.rag_ingestion_service import rag_ingestion_service
 from app.services.rag_agent.sse_adapter import sse_graph_adapter
 
@@ -41,7 +46,7 @@ async def _stream_chat_response(
     if full_answer:
         await memory_service.add_history(invoke_id, trigger_message, full_answer)
         label = f" ({history_label})" if history_label else ""
-        print(f"📝 [History Saved] invokeId: {invoke_id}{label}")
+        logger.info(f"[History Saved] invokeId: {invoke_id}{label}")
 
 
 @router.post("/upload/{invokeId}", summary="문서 업로드 및 인덱싱 (SSE)")
@@ -57,42 +62,41 @@ async def upload_document(
     sse_graph_adapter.cancel_pending(invokeId)
 
     try:
-        # 파일 저장 준비
-        upload_dir = os.path.join(settings.UPLOAD_DIR, invokeId)
-        os.makedirs(upload_dir, exist_ok=True)
-        
+        # 파일 저장 (Path Traversal 방지 포함)
+        # attachFile_name이 있으면 UploadFile의 filename을 덮어씀
+        if attachFile_name:
+            attachFile_bin.filename = attachFile_name
+
+        saved_file_path, _ = await save_upload_file(
+            attachFile_bin, invokeId,
+            default_filename="uploaded_file"
+        )
         final_filename = attachFile_name if attachFile_name else attachFile_bin.filename
-        saved_file_path = os.path.join(upload_dir, final_filename)
-        
-        content = await attachFile_bin.read()
-        with open(saved_file_path, "wb") as fp:
-            fp.write(content)
-            
-        print(f"📂 [Upload] Start ingesting file: {final_filename} for room: {invokeId}")
+
+        logger.info(f"[Upload] Start ingesting file: {final_filename} for room: {invokeId}")
 
         async def stream_progress():
             queue = asyncio.Queue()
 
             # 진행률 콜백 (큐에 넣음)
             async def on_progress(percent: int, message: str):
-                print(f"🚀 [SSE] Queueing progress: {percent}% - {message}")
-                data = json.dumps({"type": "progress", "percent": percent, "message": message}, ensure_ascii=False)
-                await queue.put(f"data: {data}\n\n")
+                logger.debug(f"[SSE] Queueing progress: {percent}% - {message}")
+                await queue.put(create_sse_data({"type": "progress", "percent": percent, "message": message}))
 
             # 인덱싱 작업을 별도 태스크로 실행
             async def run_ingestion():
                 try:
                     await rag_ingestion_service.ingest_file(
-                        final_filename, 
-                        invokeId, 
-                        saved_file_path, 
+                        final_filename,
+                        invokeId,
+                        saved_file_path,
                         on_progress=on_progress
                     )
                     # 완료 이벤트
-                    await queue.put(f"data: {json.dumps({'type': 'done', 'message': '모든 인덱싱 작업이 완료되었습니다.'}, ensure_ascii=False)}\n\n")
+                    await queue.put(create_sse_data({"type": "done", "message": "모든 인덱싱 작업이 완료되었습니다."}))
                 except Exception as e:
-                    print(f"⚠️ [Upload Stream Error] {e}")
-                    await queue.put(f"data: {json.dumps({'type': 'error', 'detail': str(e)}, ensure_ascii=False)}\n\n")
+                    logger.error(f"[Upload Stream Error] {e}")
+                    await queue.put(create_sse_data({"type": "error", "detail": str(e)}))
                 finally:
                     # 종료 신호
                     await queue.put(None)
@@ -110,18 +114,10 @@ async def upload_document(
             # 태스크 완료 대기 및 예외 전파
             await task
 
-        return StreamingResponse(
-            stream_progress(), 
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"
-            }
-        )
+        return create_sse_response(stream_progress())
 
     except Exception as e:
-        print(f"⚠️ [Upload Failed] {e}")
+        logger.error(f"[Upload Failed] {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -142,13 +138,10 @@ async def send_private_message(
         generator = sse_graph_adapter.invoke_with_sse(invokeId, message, filter_filename=target_filename)
         
         # 공통 헬퍼로 스트리밍 반환
-        return StreamingResponse(
-            _stream_chat_response(generator, invokeId, message, "Private"),
-            media_type="text/event-stream"
-        )
+        return create_sse_response(_stream_chat_response(generator, invokeId, message, "Private"))
 
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"[Private Message Error] {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -165,13 +158,10 @@ async def send_open_message(
         generator = sse_graph_adapter.invoke_with_sse(invokeId, message, filter_filename=None)
         
         # 공통 헬퍼로 스트리밍 반환
-        return StreamingResponse(
-            _stream_chat_response(generator, invokeId, message, "Open"),
-            media_type="text/event-stream"
-        )
+        return create_sse_response(_stream_chat_response(generator, invokeId, message, "Open"))
 
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"[Open Message Error] {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -187,11 +177,10 @@ async def continue_conversation(
     clarification_needed 이벤트에서 받은 thread_id와
     사용자의 명확화 응답을 사용하여 대화를 계속합니다.
     """
-    print(f"📥 [Continue Request] invokeId: {invokeId}, thread_id: {thread_id}, response: {response}")
+    logger.info(f"[Continue Request] invokeId: {invokeId}, thread_id: {thread_id}, response: {response}")
 
     if not thread_id or not response:
-        # 422 에러 원인을 파악하기 위해 로그 출력
-        print(f"⚠️ [Continue Validation Failed] Missing thread_id or response")
+        logger.warning(f"[Continue Validation Failed] Missing thread_id or response")
         raise HTTPException(status_code=422, detail="thread_id와 response는 필수입니다.")
 
     try:
@@ -199,13 +188,10 @@ async def continue_conversation(
         generator = sse_graph_adapter.continue_with_sse(invokeId, thread_id, response)
         
         # 공통 헬퍼로 스트리밍 반환
-        return StreamingResponse(
-            _stream_chat_response(generator, invokeId, response, "Continue"),
-            media_type="text/event-stream"
-        )
+        return create_sse_response(_stream_chat_response(generator, invokeId, response, "Continue"))
 
     except Exception as e:
-        print(f"Continue Error: {e}")
+        logger.error(f"[Continue Error] {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -216,8 +202,8 @@ async def get_uploaded_files(invokeId: str):
     (정렬: 오래된 파일 -> 최신 파일 순)
     """
     try:
-        upload_dir = os.path.join(settings.UPLOAD_DIR, invokeId)
-        
+        upload_dir = safe_join(settings.UPLOAD_DIR, invokeId)
+
         if not os.path.exists(upload_dir):
             return {"files": []}
             
@@ -237,5 +223,5 @@ async def get_uploaded_files(invokeId: str):
         return {"files": sorted_files}
         
     except Exception as e:
-        print(f"File List Error: {e}")
+        logger.error(f"[File List Error] {e}")
         raise HTTPException(status_code=500, detail=str(e))

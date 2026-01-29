@@ -182,7 +182,6 @@ data: {"type": "done"}                             ← 완료
 │  └─ 기타 → MarkItDown으로 마크다운 변환
 │                        │
 │  페이지 단위 청크 분할   │
-│  ├─ parent_chunk_store → Redis에 원본 청크 저장
 │  ├─ local_index_service → ColBERT 임베딩 + Voyager 인덱스 구축
 │  └─ lightrag_service → Neo4j 그래프에 엔티티/관계 추출 및 저장
 └────────────────────────┘
@@ -191,13 +190,11 @@ data: {"type": "done"}                             ← 완료
 ## 설치 및 실행 (Installation & Run)
 
 ### 사전 요구 사항 (Prerequisites)
-*   Python 3.10 이상
-*   Redis Server
-*   Neo4j Server
-*   vLLM 호환 LLM 서버
-*   임베딩/Reranker 모델 서버
+*   Docker & Docker Compose
+*   vLLM 호환 LLM 서버 (외부)
+*   임베딩/Reranker 모델 서버 (외부)
 
-### 로컬 개발 환경 설정
+### 빠른 시작 (Docker)
 
 1.  **저장소 클론**
     ```bash
@@ -205,20 +202,18 @@ data: {"type": "done"}                             ← 완료
     cd <project-directory>
     ```
 
-2.  **가상 환경 생성 및 의존성 설치**
+2.  **환경 변수 설정**
+
+    `.env` 파일을 생성하고 외부 서버 주소를 설정합니다.
+
     ```bash
-    python -m venv .venv
-    # Windows
-    .venv\Scripts\activate
-    # macOS/Linux
-    source .venv/bin/activate
-
-    pip install -r requirement.txt
+    # .env 예시
+    VLLM_BASE_URL=http://10.0.0.5:8080
+    VLLM_MODEL=LGAI-EXAONE/EXAONE-4.0-32B-AWQ
+    MODEL_SERVER_URL=http://10.0.0.5:8081
+    STT_BASE_URL=http://10.0.0.5:8082
+    NEO4J_PASSWORD=mypassword
     ```
-
-3.  **환경 변수 설정**
-
-    `.env` 파일을 생성하거나 시스템 환경 변수를 설정합니다. 주요 설정값은 `app/core/config.py`를 참고하세요.
 
     | 변수 | 설명 | 기본값 |
     |------|------|--------|
@@ -230,28 +225,36 @@ data: {"type": "done"}                             ← 완료
     | `NEO4J_USERNAME` / `NEO4J_PASSWORD` | Neo4j 인증 | `neo4j` / `password` |
     | `STT_BASE_URL` | STT 서버 주소 | - |
 
-4.  **서버 실행**
+3.  **Docker Compose로 실행**
+
     ```bash
-    uvicorn app.main:app --reload
+    docker-compose up -d --build
     ```
 
-### Docker 실행
+    | 서비스 | 컨테이너 | 포트 | 설명 |
+    |--------|----------|------|------|
+    | `app` | `llm_gateway` | 8000 | FastAPI 애플리케이션 |
+    | `redis` | `otinus_redis` | 6379 | Redis Stack (검색 기능 포함) |
+    | `neo4j` | `otinus_neo4j` | 7474, 7687 | Neo4j Community (Browser + Bolt) |
 
-`docker-compose.yaml`에 LLM Gateway, Redis, Neo4j가 모두 포함되어 있습니다. 외부 서버(vLLM, Model Server 등) 주소는 `.env` 파일이나 환경 변수로 지정합니다.
+4.  **확인**
+    *   API 서버: `http://localhost:8000`
+    *   Swagger UI: `http://localhost:8000/docs`
+    *   Neo4j Browser: `http://localhost:7474`
+
+### 로컬 개발 환경 (Docker 없이)
+
+Docker 없이 직접 실행하려면 Redis와 Neo4j를 별도로 설치해야 합니다.
 
 ```bash
-# 기본 실행
-docker-compose up -d --build
+# 가상 환경 생성 및 의존성 설치
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 
-# 환경 변수 지정 예시
-VLLM_BASE_URL=http://10.0.0.5:8080 NEO4J_PASSWORD=mypassword docker-compose up -d --build
+# 서버 실행
+uvicorn app.main:app --reload
 ```
-
-| 서비스 | 컨테이너 | 포트 | 설명 |
-|--------|----------|------|------|
-| `app` | `llm_gateway` | 8000 | FastAPI 애플리케이션 |
-| `redis` | `otinus_redis` | 6379 | Redis Stack (검색 기능 포함) |
-| `neo4j` | `otinus_neo4j` | 7474, 7687 | Neo4j Community (Browser + Bolt) |
 
 ## 프로젝트 구조 (Project Structure)
 
@@ -271,8 +274,7 @@ VLLM_BASE_URL=http://10.0.0.5:8080 NEO4J_PASSWORD=mypassword docker-compose up -
 │   │   ├── rag/               # RAG 서비스
 │   │   │   ├── lightrag_service.py        # Neo4j 기반 그래프 검색
 │   │   │   ├── local_index_service.py     # ColBERT + Voyager 로컬 인덱스
-│   │   │   ├── rag_ingestion_service.py   # 문서 인제스트 파이프라인
-│   │   │   └── parent_chunk_store.py      # Redis 청크 저장소
+│   │   │   └── rag_ingestion_service.py   # 문서 인제스트 파이프라인
 │   │   ├── rag_agent/         # LangGraph 에이전트
 │   │   │   ├── graph.py           # 그래프 정의
 │   │   │   ├── graph_state.py     # 상태 클래스
@@ -288,7 +290,7 @@ VLLM_BASE_URL=http://10.0.0.5:8080 NEO4J_PASSWORD=mypassword docker-compose up -
 ├── colbert_indexes/           # RAG 검색 인덱스 데이터
 ├── uploaded_files/            # 사용자 업로드 파일
 ├── test_sse.html              # SSE 스트리밍 테스트 콘솔
-├── requirement.txt
+├── requirements.txt
 ├── Dockerfile
 └── docker-compose.yaml
 ```

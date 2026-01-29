@@ -6,9 +6,12 @@ ColBERT 검색을 LangGraph 도구로 래핑
 - 게이트웨이: local_index_service로 검색
 """
 
+import logging
 from typing import List, Dict, Any
 from app.services.rag.local_index_service import local_index_service
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class ColBERTSearchTool:
@@ -30,8 +33,8 @@ class ColBERTSearchTool:
         """
         k = top_k or settings.COLBERT_TOP_K
 
-        print(f"🔍 [Search] query: {query[:50]}...")
-        print(f"🔍 [Search] invoke_id: {self.invoke_id}, top_k: {k}, filter: {filter_filename}")
+        logger.info(f"[Search] query: {query[:50]}...")
+        logger.debug(f"[Search] invoke_id: {self.invoke_id}, top_k: {k}, filter: {filter_filename}")
 
         # 로컬 인덱스에서 검색
         search_results = await local_index_service.search(
@@ -40,7 +43,7 @@ class ColBERTSearchTool:
             top_k=k
         )
 
-        print(f"🔍 [Search] {len(search_results)}개 결과")
+        logger.info(f"[Search] {len(search_results)}개 결과")
 
         if not search_results:
             return {"context": None, "references": [], "results": []}
@@ -63,7 +66,7 @@ class ColBERTSearchTool:
 
         for doc in results:
             score = doc.get("score", 0)
-            print(f"🔍 [Score] {score:.2f}")
+            logger.debug(f"[Score] {score:.2f}")
 
             # score 임계값 (필요시 조정)
             if score < 17.0:
@@ -112,7 +115,7 @@ class ColBERTSearchTool:
         """
         k = top_k or settings.COLBERT_TOP_K
 
-        print(f"🔍 [Batch Search] {len(queries)}개 쿼리, invoke_id: {self.invoke_id}, filter: {filter_filename}")
+        logger.info(f"[Batch Search] {len(queries)}개 쿼리, invoke_id: {self.invoke_id}, filter: {filter_filename}")
 
         # 로컬 인덱스에서 배치 검색
         batch_results = await local_index_service.search_batch(
@@ -121,7 +124,7 @@ class ColBERTSearchTool:
             top_k=k
         )
 
-        print(f"🔍 [Batch Search] {len(batch_results)}개 결과 수신")
+        logger.info(f"[Batch Search] {len(batch_results)}개 결과 수신")
 
         all_search_results = []
 
@@ -145,13 +148,13 @@ class ColBERTSearchTool:
                 score = r.score
                 content = r.content.strip()
                 if is_first:
-                    print(f"  🥇 [Q{idx+1}] score: {score:.2f} | 전체 내용:\n{content}")
+                    logger.debug(f"  [Q{idx+1}] score: {score:.2f} | 전체 내용:\n{content}")
                     is_first = False
                 else:
-                    print(f"  📄 [Q{idx+1}] score: {score:.2f} | {content[:80]}...")
+                    logger.debug(f"  [Q{idx+1}] score: {score:.2f} | {content[:80]}...")
 
                 if score < 17.0:
-                    print(f"  ⛔ [Q{idx+1}] score {score:.2f} < 17.0, 제외")
+                    logger.debug(f"  [Q{idx+1}] score {score:.2f} < 17.0, 제외")
                     continue
                 source = r.metadata.get("source", "unknown")
                 page = r.metadata.get("page", 0)

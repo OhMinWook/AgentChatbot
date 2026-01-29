@@ -1,12 +1,15 @@
 """STT 서버와 통신하는 클라이언트"""
+import logging
 import httpx
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class STTClient:
     def __init__(self):
         self.base_url = settings.STT_BASE_URL
-        self.timeout = 300.0  # STT는 오래 걸릴 수 있으므로 5분
+        self.timeout = settings.STT_TIMEOUT  # STT는 오래 걸릴 수 있으므로 5분
 
         # 클라이언트는 lazy initialization (첫 사용 시 생성)
         self._client: httpx.AsyncClient | None = None
@@ -45,10 +48,10 @@ class STTClient:
             return result.get("transcription") or result.get("text") or result.get("transcript", "")
 
         except httpx.HTTPStatusError as e:
-            print(f"STT Server Error: {e.response.text}")
+            logger.error(f"STT Server Error: {e.response.text}")
             raise e
         except httpx.RequestError as e:
-            print(f"STT Connection Error: {e}")
+            logger.error(f"STT Connection Error: {e}")
             raise e
 
     async def transcribe_bytes(self, audio_bytes: bytes, filename: str = "audio.wav") -> str:
@@ -70,10 +73,10 @@ class STTClient:
             return result.get("transcription") or result.get("text") or result.get("transcript", "")
 
         except httpx.HTTPStatusError as e:
-            print(f"STT Server Error: {e.response.text}")
+            logger.error(f"STT Server Error: {e.response.text}")
             raise e
         except httpx.RequestError as e:
-            print(f"STT Connection Error: {e}")
+            logger.error(f"STT Connection Error: {e}")
             raise e
 
 

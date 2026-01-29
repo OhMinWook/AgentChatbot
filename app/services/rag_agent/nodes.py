@@ -45,7 +45,7 @@ async def _call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json
             }
 
         response = await llm_client.chat_completions(payload)
-        content = response["choices"][0]["message"]["content"]
+        content = llm_client.extract_content(response)
         return content.strip()
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
@@ -57,7 +57,7 @@ async def summarize_node(state: MainState) -> Dict[str, Any]:
     invoke_id = state.get("invoke_id", "")
     messages = state.get("messages", [])
 
-    print(f"📝 [Summarize] invoke_id: {invoke_id}")
+    logger.info(f"[Summarize] invoke_id: {invoke_id}")
 
     # 원본 쿼리 저장 (마지막 HumanMessage)
     original_query = ""
@@ -66,7 +66,7 @@ async def summarize_node(state: MainState) -> Dict[str, Any]:
             original_query = msg.content
             break
 
-    print(f"📝 [Summarize] original_query: {original_query[:100]}...")
+    logger.info(f"[Summarize] original_query: {original_query[:100]}...")
 
     # Redis에서 대화 히스토리 가져오기
     try:
@@ -81,10 +81,10 @@ async def summarize_node(state: MainState) -> Dict[str, Any]:
 
             prompt = SUMMARIZE_PROMPT.format(conversation_history=conversation_text)
             summary = await _call_llm([{"role": "user", "content": prompt}], max_tokens=500)
-            print(f"📝 [Summarize] 요약 완료: {summary[:100]}...")
+            logger.info(f"[Summarize] 요약 완료: {summary[:100]}...")
         else:
             summary = ""
-            print(f"📝 [Summarize] 히스토리 없음, 요약 스킵")
+            logger.info("[Summarize] 히스토리 없음, 요약 스킵")
     except Exception as e:
         logger.error(f"Summarize failed: {e}")
         summary = ""
@@ -107,7 +107,7 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
         file_label = filter_filename.rsplit(".", 1)[0]
         query_for_analysis = f"[문서: {file_label}] {original_query}"
 
-    print(f"🔍 [Analyze] 쿼리 분석 시작: {query_for_analysis[:100]}...")
+    logger.info(f"[Analyze] 쿼리 분석 시작: {query_for_analysis[:100]}...")
 
     prompt = ANALYZE_REWRITE_PROMPT.format(
         conversation_summary=conversation_summary or "(이전 대화 없음)",
@@ -135,7 +135,7 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
         json_schema=json_schema
     )
 
-    print(f"🔍 [Analyze] LLM 응답: {response[:500] if response else '(빈 응답)'}")
+    logger.debug(f"[Analyze] LLM 응답: {response[:500] if response else '(빈 응답)'}")
 
     # 빈 응답 처리
     if not response:
@@ -165,12 +165,12 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
         rewritten_questions = result.get("rewritten_questions", [original_query])
         clarification_message = result.get("clarification_message", DEFAULT_CLARIFICATION_MESSAGE)
 
-        print(f"🔍 [Analyze] is_clear: {is_clear}")
-        print(f"🔍 [Analyze] rewritten_questions: {rewritten_questions}")
+        logger.debug(f"[Analyze] is_clear: {is_clear}")
+        logger.debug(f"[Analyze] rewritten_questions: {rewritten_questions}")
 
         # 명확화를 이미 1회 요청했으면 불명확하더라도 강제 진행
         if not is_clear and clarification_count >= 2:
-            print(f"🔍 [Analyze] 명확화 횟수 초과 ({clarification_count}회), 강제 진행")
+            logger.info(f"[Analyze] 명확화 횟수 초과 ({clarification_count}회), 강제 진행")
             is_clear = True
 
         if not rewritten_questions:
@@ -198,7 +198,7 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
 
 async def human_input_node(state: MainState) -> Dict[str, Any]:
     """Human-in-the-loop 노드 - 사용자 입력 대기"""
-    print(f"⏸️ [HumanInput] 사용자 입력 대기 중...")
+    logger.info("[HumanInput] 사용자 입력 대기 중...")
 
     # 이 노드는 interrupt_before에 의해 그래프가 일시 정지됨
     # SSE를 통해 클라이언트에 clarification_needed 이벤트를 보내고
@@ -223,9 +223,9 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
     if not questions or not questions[0]:
         return {"agent_answers": []}
 
-    print(f"🔄 [Process] {len(questions)}개 질문 배치 처리 시작 (필터: {filter_filename})")
+    logger.info(f"[Process] {len(questions)}개 질문 배치 처리 시작 (필터: {filter_filename})")
     for i, q in enumerate(questions):
-        print(f"  ❓ 질문 {i+1}: {q}")
+        logger.debug(f"  질문 {i+1}: {q}")
 
     # 1. ColBERT 배치 검색 (로컬 Voyager 인덱스)
     search_tool = create_search_tool(invoke_id)
@@ -280,7 +280,7 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
                 "prompt": prompt
             }]
 
-        print(f"✅ [Process] 단일 질문 - 스트리밍 준비 완료")
+        logger.info("[Process] 단일 질문 - 스트리밍 준비 완료")
         return {"agent_answers": all_answers}
 
     # 복수 질문: 각각 LLM 호출 (통합 시 필요)
@@ -304,7 +304,7 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
         for idx in range(len(questions))
     ]
 
-    print(f"🔄 [Process] {len(tasks)}개 질문 답변 생성 중... (LightRAG 통합)")
+    logger.info(f"[Process] {len(tasks)}개 질문 답변 생성 중... (LightRAG 통합)")
     all_results = await asyncio.gather(*tasks)
 
     # 원래 순서대로 정렬 (idx 기준)
@@ -316,7 +316,7 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
         "sources": r["sources"]
     } for r in all_results]
 
-    print(f"✅ [Process] {len(all_answers)}개 답변 완료")
+    logger.info(f"[Process] {len(all_answers)}개 답변 완료")
     return {"agent_answers": all_answers}
 
 

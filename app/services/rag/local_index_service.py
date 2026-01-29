@@ -9,9 +9,12 @@
 import os
 import json
 import asyncio
+import logging
 import numpy as np
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 from pylate import indexes, retrieve
 
@@ -79,10 +82,10 @@ class LocalIndexService:
                     override=False
                 )
                 self._retrievers[invoke_id] = retrieve.ColBERT(index=self._indexes[invoke_id])
-                print(f"📂 [LocalIndex] Loaded existing index: {invoke_id}")
+                logger.info(f"[LocalIndex] Loaded existing index: {invoke_id}")
                 return self._indexes[invoke_id]
             except Exception as e:
-                print(f"⚠️ [LocalIndex] Failed to load index {invoke_id}: {e}")
+                logger.warning(f"[LocalIndex] Failed to load index {invoke_id}: {e}")
 
         if create_if_missing:
             os.makedirs(index_path, exist_ok=True)
@@ -92,7 +95,7 @@ class LocalIndexService:
                 override=True
             )
             self._retrievers[invoke_id] = retrieve.ColBERT(index=self._indexes[invoke_id])
-            print(f"📂 [LocalIndex] Created new index: {invoke_id}")
+            logger.info(f"[LocalIndex] Created new index: {invoke_id}")
             return self._indexes[invoke_id]
 
         return None
@@ -116,18 +119,18 @@ class LocalIndexService:
         doc_ids = [doc["id"] for doc in documents]
         doc_contents = [doc["content"] for doc in documents]
 
-        print(f"🔄 [LocalIndex] Indexing {len(documents)} documents for '{invoke_id}'...")
+        logger.info(f"[LocalIndex] Indexing {len(documents)} documents for '{invoke_id}'...")
 
         # 1. 모델 서버에서 임베딩 생성
         embeddings = await model_server_client.encode_documents(doc_contents)
 
         if not embeddings:
-            print(f"❌ [LocalIndex] Failed to get embeddings")
+            logger.error("[LocalIndex] Failed to get embeddings")
             return 0
 
         # ColBERT 임베딩: 각 문서마다 토큰 수가 다름 → 개별 numpy 배열로 변환 (float32)
         embeddings_list = [np.array(emb, dtype=np.float32) for emb in embeddings]
-        print(f"📐 [LocalIndex] Embeddings: {len(embeddings_list)} docs, first shape: {embeddings_list[0].shape}")
+        logger.debug(f"[LocalIndex] Embeddings: {len(embeddings_list)} docs, first shape: {embeddings_list[0].shape}")
 
         # 2. Voyager 인덱스에 저장
         index = await self._load_or_create_index(invoke_id)
@@ -151,7 +154,7 @@ class LocalIndexService:
 
         await pipe.execute()
 
-        print(f"✅ [LocalIndex] Indexed {len(documents)} documents")
+        logger.info(f"[LocalIndex] Indexed {len(documents)} documents")
         return len(documents)
 
     async def search(
@@ -169,16 +172,16 @@ class LocalIndexService:
         """
         index = await self._load_or_create_index(invoke_id, create_if_missing=False)
         if index is None:
-            print(f"⚠️ [LocalIndex] No index for '{invoke_id}'")
+            logger.warning(f"[LocalIndex] No index for '{invoke_id}'")
             return []
 
-        print(f"🔍 [LocalIndex] Searching '{invoke_id}': {query[:50]}...")
+        logger.info(f"[LocalIndex] Searching '{invoke_id}': {query[:50]}...")
 
         # 1. 모델 서버에서 쿼리 임베딩 생성
         query_embeddings = await model_server_client.encode_query([query])
 
         if not query_embeddings:
-            print(f"❌ [LocalIndex] Failed to get query embedding")
+            logger.error("[LocalIndex] Failed to get query embedding")
             return []
 
         # ColBERT 쿼리 임베딩: 개별 numpy 배열로 변환 (float32)
@@ -226,7 +229,7 @@ class LocalIndexService:
                 metadata=metadata
             ))
 
-        print(f"✅ [LocalIndex] Found {len(results)} results (score >= 17.0)")
+        logger.info(f"[LocalIndex] Found {len(results)} results (score >= 17.0)")
         return results
 
     async def search_batch(
@@ -240,7 +243,7 @@ class LocalIndexService:
         if index is None:
             return [[] for _ in queries]
 
-        print(f"🔍 [LocalIndex] Batch searching '{invoke_id}': {len(queries)} queries...")
+        logger.info(f"[LocalIndex] Batch searching '{invoke_id}': {len(queries)} queries...")
 
         # 1. 모델 서버에서 쿼리 임베딩 생성 (배치)
         query_embeddings = await model_server_client.encode_query(queries)
@@ -294,7 +297,7 @@ class LocalIndexService:
 
             all_results.append(results)
 
-        print(f"✅ [LocalIndex] Batch search complete: {len(all_results)} queries (score >= 17.0)")
+        logger.info(f"[LocalIndex] Batch search complete: {len(all_results)} queries (score >= 17.0)")
         return all_results
 
     async def delete_index(self, invoke_id: str) -> int:
@@ -324,7 +327,7 @@ class LocalIndexService:
             if cursor == 0:
                 break
 
-        print(f"🗑️ [LocalIndex] Deleted index '{invoke_id}' ({deleted} docs)")
+        logger.info(f"[LocalIndex] Deleted index '{invoke_id}' ({deleted} docs)")
         return deleted
 
     async def load_existing_indexes(self):
@@ -338,9 +341,9 @@ class LocalIndexService:
                 try:
                     await self._load_or_create_index(invoke_id, create_if_missing=False)
                 except Exception as e:
-                    print(f"⚠️ [LocalIndex] Failed to load {invoke_id}: {e}")
+                    logger.warning(f"[LocalIndex] Failed to load {invoke_id}: {e}")
 
-        print(f"✅ [LocalIndex] Loaded {len(self._indexes)} indexes")
+        logger.info(f"[LocalIndex] Loaded {len(self._indexes)} indexes")
 
 
 # 싱글톤

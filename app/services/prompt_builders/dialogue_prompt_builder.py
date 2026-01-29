@@ -1,0 +1,90 @@
+"""대화록 요약용 프롬프트 빌더 - 날짜별/전체 대화 요약 LLM 요청 payload 생성"""
+
+from typing import Dict, Any, List
+from app.core.config import settings
+
+
+class DialoguePromptBuilder:
+    def __init__(self):
+        self.daily_system_prompt = (
+            "너는 대화 내용을 분석하고 요약하는 전문가야.\n"
+            "주어진 대화 내용을 빠짐없이 분석하여 핵심 주제와 결론을 추출해줘.\n\n"
+            "### [분석 방법]\n"
+            "1. 전체 대화를 처음부터 끝까지 읽어\n"
+            "2. 화자를 구분하고 각자의 입장을 파악해\n"
+            "3. 논의된 모든 주제와 사안을 나열해\n"
+            "4. 합의된 사항이나 결론을 정리해\n\n"
+            "### [절대 원칙]\n"
+            "1. 없는 내용 창조 금지 - 대화에 없는 내용은 절대 추가하지 마\n"
+            "2. 누락 금지 - 언급된 내용은 사소해도 기록해\n"
+            "3. 구체적 정보 보존 - 날짜/시간/금액/이름은 정확히 기재\n\n"
+            "### [출력 형식]\n"
+            "해당 날짜의 대화 내용을 간결하게 요약해줘. "
+            "핵심 주제, 주요 논의 사항, 결론 또는 합의 사항을 포함해서 작성해."
+        )
+
+        self.overall_system_prompt = (
+            "너는 대화 내용을 종합 분석하는 전문가야.\n"
+            "여러 날에 걸친 대화 요약들을 종합하여 전체 흐름과 핵심 내용을 정리해줘.\n\n"
+            "### [분석 방법]\n"
+            "1. 각 날짜별 요약을 순서대로 읽어\n"
+            "2. 전체 대화의 흐름과 맥락을 파악해\n"
+            "3. 반복적으로 등장하는 주제나 핵심 사안을 식별해\n"
+            "4. 최종 결론이나 합의 사항을 정리해\n\n"
+            "### [절대 원칙]\n"
+            "1. 없는 내용 창조 금지\n"
+            "2. 핵심 내용 누락 금지\n"
+            "3. 날짜별 요약에 기반하여 종합적으로 정리\n\n"
+            "### [출력 형식]\n"
+            "전체 대화의 핵심 주제, 주요 논의 흐름, 최종 결론을 종합적으로 요약해줘."
+        )
+
+    def build_daily_summary_payload(self, date: str, dialogue_text: str) -> Dict[str, Any]:
+        """
+        날짜별 대화 텍스트를 vLLM 요약 요청 payload로 변환
+
+        :param date: 대화 날짜 (예: "2025-01-15")
+        :param dialogue_text: 해당 날짜의 대화 텍스트
+        :return: vLLM API 요청용 payload
+        """
+        user_content = f"다음은 {date} 날짜의 대화 내용이야. 요약해줘:\n\n{dialogue_text}"
+
+        messages = [
+            {"role": "system", "content": self.daily_system_prompt},
+            {"role": "user", "content": user_content}
+        ]
+
+        return {
+            "model": settings.VLLM_MODEL,
+            "messages": messages,
+            "max_tokens": settings.DEFAULT_MAX_TOKENS,
+            "temperature": settings.DEFAULT_TEMPERATURE,
+        }
+
+    def build_overall_summary_payload(self, daily_summaries: List[Dict[str, str]]) -> Dict[str, Any]:
+        """
+        날짜별 요약들을 종합하여 전체 요약 요청 payload로 변환
+
+        :param daily_summaries: [{"date": "2025-01-15", "summary": "..."}, ...] 형태의 리스트
+        :return: vLLM API 요청용 payload
+        """
+        summaries_text = "\n\n".join(
+            f"[{s['date']}]\n{s['summary']}" for s in daily_summaries
+        )
+        user_content = f"다음은 날짜별 대화 요약이야. 전체 내용을 종합적으로 요약해줘:\n\n{summaries_text}"
+
+        messages = [
+            {"role": "system", "content": self.overall_system_prompt},
+            {"role": "user", "content": user_content}
+        ]
+
+        return {
+            "model": settings.VLLM_MODEL,
+            "messages": messages,
+            "max_tokens": settings.DEFAULT_MAX_TOKENS,
+            "temperature": settings.DEFAULT_TEMPERATURE,
+        }
+
+
+# 싱글톤 인스턴스
+dialogue_prompt_builder = DialoguePromptBuilder()

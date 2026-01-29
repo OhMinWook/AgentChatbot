@@ -5,9 +5,12 @@
 - 키워드 추출
 """
 
+import logging
 import httpx
 from typing import List, Dict, Optional
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class ModelServerClient:
@@ -17,7 +20,7 @@ class ModelServerClient:
     def __init__(self):
         self.base_url = settings.MODEL_SERVER_URL
         self.headers = {"Content-Type": "application/json"}
-        self.timeout = 600.0  # 10분 (대량 인코딩용)
+        self.timeout = settings.MODEL_SERVER_TIMEOUT  # 10분 (대량 인코딩용)
         self._async_client: Optional[httpx.AsyncClient] = None
 
     @property
@@ -51,10 +54,10 @@ class ModelServerClient:
             response.raise_for_status()
             return response.json()["embeddings"]
         except httpx.HTTPStatusError as e:
-            print(f"Model Server Error (Encode Documents): {e.response.text}")
+            logger.error(f"Model Server Error (Encode Documents): {e.response.text}")
             raise e
         except (httpx.RequestError, KeyError) as e:
-            print(f"Model Server Connection Error (Encode Documents): {e}")
+            logger.error(f"Model Server Connection Error (Encode Documents): {e}")
             raise e
 
     async def encode_query(self, queries: List[str]) -> List[List[List[float]]]:
@@ -73,10 +76,10 @@ class ModelServerClient:
             response.raise_for_status()
             return response.json()["embeddings"]
         except httpx.HTTPStatusError as e:
-            print(f"Model Server Error (Encode Query): {e.response.text}")
+            logger.error(f"Model Server Error (Encode Query): {e.response.text}")
             raise e
         except (httpx.RequestError, KeyError) as e:
-            print(f"Model Server Connection Error (Encode Query): {e}")
+            logger.error(f"Model Server Connection Error (Encode Query): {e}")
             raise e
 
     # ========================================
@@ -95,14 +98,14 @@ class ModelServerClient:
         payload = {"texts": texts}
 
         try:
-            response = await self.async_client.post(url, json=payload, headers=self.headers, timeout=120.0)
+            response = await self.async_client.post(url, json=payload, headers=self.headers, timeout=settings.MODEL_SERVER_KEYWORD_TIMEOUT)
             response.raise_for_status()
             return response.json()["keywords"]
         except httpx.HTTPStatusError as e:
-            print(f"Model Server Error (Keyword Extraction): {e.response.text}")
+            logger.error(f"Model Server Error (Keyword Extraction): {e.response.text}")
             raise e
         except (httpx.RequestError, KeyError) as e:
-            print(f"Model Server Connection Error (Keyword Extraction): {e}")
+            logger.error(f"Model Server Connection Error (Keyword Extraction): {e}")
             raise e
 
     # ========================================
@@ -122,14 +125,14 @@ class ModelServerClient:
 
         try:
             # 배치 처리는 시간이 오래 걸릴 수 있으므로 넉넉한 타임아웃 설정
-            response = await self.async_client.post(url, json=payload, headers=self.headers, timeout=300.0)
+            response = await self.async_client.post(url, json=payload, headers=self.headers, timeout=settings.MODEL_SERVER_GRAPH_TIMEOUT)
             response.raise_for_status()
             return response.json()["results"]
         except httpx.HTTPStatusError as e:
-            print(f"Model Server Error (Graph Extraction): {e.response.text}")
+            logger.error(f"Model Server Error (Graph Extraction): {e.response.text}")
             return [{"entities": [], "relationships": []}] * len(texts)
         except Exception as e:
-            print(f"Model Server Connection Error (Graph Extraction): {e}")
+            logger.error(f"Model Server Connection Error (Graph Extraction): {e}")
             return [{"entities": [], "relationships": []}] * len(texts)
 
     # ========================================
@@ -140,7 +143,7 @@ class ModelServerClient:
         """모델 서버 상태 확인"""
         url = f"{self.base_url}/health"
         try:
-            response = await self.async_client.get(url, timeout=10.0)
+            response = await self.async_client.get(url, timeout=settings.MODEL_SERVER_HEALTH_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except Exception as e:

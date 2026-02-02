@@ -11,9 +11,12 @@ logger = logging.getLogger(__name__)
 from app.services.utils.memory_service import memory_service
 from app.services.utils.path_validator import safe_join
 from app.services.utils.file_utils import save_upload_file
-from app.services.utils.sse_utils import create_sse_data, create_sse_response
+from app.services.utils.sse_utils import create_sse_data, create_sse_response, SSEType
 from app.services.rag.rag_ingestion_service import rag_ingestion_service
-from app.services.rag_agent.sse_adapter import sse_graph_adapter
+from app.services.chat_agent.sse_adapter import sse_graph_adapter
+from app.services.api_clients.llm_client import llm_client
+from app.services.api_clients.model_server_client import model_server_client, SearchResult
+from app.services.prompt_builders.document_summary_prompt_builder import document_summary_prompt_builder
 
 router = APIRouter()
 
@@ -81,7 +84,23 @@ async def upload_document(
             # 진행률 콜백 (큐에 넣음)
             async def on_progress(percent: int, message: str):
                 logger.debug(f"[SSE] Queueing progress: {percent}% - {message}")
-                await queue.put(create_sse_data({"type": "progress", "percent": percent, "message": message}))
+                await queue.put(create_sse_data({"type": SSEType.PROGRESS, "percent": percent, "message": message}))
+
+            # 마크다운 결과 콜백 (디버깅용, 100KB 제한)
+            async def on_markdown(markdown_content: str):
+                logger.debug(f"[SSE] Queueing markdown preview: {len(markdown_content)} chars")
+                # SSE 청크 크기 제한 (100KB) - 너무 크면 truncate
+                max_size = 100_000
+                truncated = len(markdown_content) > max_size
+                content_to_send = markdown_content[:max_size] if truncated else markdown_content
+                if truncated:
+                    content_to_send += f"\n\n... (이하 {len(markdown_content) - max_size:,}자 생략)"
+                await queue.put(create_sse_data({
+                    "type": SSEType.MARKDOWN_PREVIEW,
+                    "content": content_to_send,
+                    "length": len(markdown_content),
+                    "truncated": truncated
+                }))
 
             # 인덱싱 작업을 별도 태스크로 실행
             async def run_ingestion():
@@ -90,13 +109,14 @@ async def upload_document(
                         final_filename,
                         invokeId,
                         saved_file_path,
-                        on_progress=on_progress
+                        on_progress=on_progress,
+                        on_markdown=on_markdown
                     )
                     # 완료 이벤트
-                    await queue.put(create_sse_data({"type": "done", "message": "모든 인덱싱 작업이 완료되었습니다."}))
+                    await queue.put(create_sse_data({"type": SSEType.DONE, "message": "모든 인덱싱 작업이 완료되었습니다."}))
                 except Exception as e:
                     logger.error(f"[Upload Stream Error] {e}")
-                    await queue.put(create_sse_data({"type": "error", "detail": str(e)}))
+                    await queue.put(create_sse_data({"type": SSEType.ERROR, "detail": str(e)}))
                 finally:
                     # 종료 신호
                     await queue.put(None)
@@ -199,7 +219,7 @@ async def continue_conversation(
 async def get_uploaded_files(invokeId: str):
     """
     특정 invokeId(대화방)에 업로드된 파일 이름 목록을 반환합니다.
-    (정렬: 오래된 파일 -> 최신 파일 순)
+    (정렬: 최신 파일 -> 오래된 파일 순)
     """
     try:
         upload_dir = safe_join(settings.UPLOAD_DIR, invokeId)
@@ -221,7 +241,182 @@ async def get_uploaded_files(invokeId: str):
         sorted_files = [f[0] for f in files_with_path]
         
         return {"files": sorted_files}
-        
+
     except Exception as e:
         logger.error(f"[File List Error] {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/message/document-summary/{invokeId}", summary="문서 체계적 요약 (SSE)")
+async def summarize_document(
+        invokeId: str,
+        target_filename: str = Form(..., description="요약할 문서 파일명 (확장자 포함)")
+):
+    """
+    업로드된 문서를 체계적으로 요약합니다.
+
+    - **20페이지 미만**: 단순 검색 후 요약 (LLM 1회)
+    - **20페이지 이상**: 질문 분해 → 병렬 분석 → 통합 (LLM 5회)
+
+    SSE를 통해 실시간 진행률을 전송합니다.
+    """
+    async def event_stream():
+        try:
+            # 1. 문서 메타데이터 조회
+            yield create_sse_data({"type": SSEType.PROGRESS, "percent": 5, "message": "문서 정보 확인 중..."})
+
+            doc_meta = await model_server_client.colbert_get_document_metadata(invokeId, target_filename)
+
+            if not doc_meta:
+                yield create_sse_data({"type": SSEType.ERROR, "detail": f"문서를 찾을 수 없습니다: {target_filename}"})
+                return
+
+            total_pages = doc_meta["total_pages"]
+
+            # 2. 페이지 수에 따른 방식 분기
+            if document_summary_prompt_builder.needs_decomposition(total_pages):
+                # ===== 20페이지 이상: 질문 분해 방식 =====
+                questions = document_summary_prompt_builder.get_questions()
+                question_count = len(questions)
+
+                yield create_sse_data({
+                    "type": SSEType.PROGRESS,
+                    "percent": 10,
+                    "message": f"대용량 문서 ({total_pages}페이지), 질문 분해 방식으로 분석"
+                })
+
+                # ColBERT 배치 검색
+                yield create_sse_data({
+                    "type": SSEType.PROGRESS,
+                    "percent": 20,
+                    "message": "관련 문서 검색 중..."
+                })
+
+                query_texts = [q["question"] for q in questions]
+                batch_results = await model_server_client.colbert_search_batch(
+                    invokeId, query_texts, top_k=settings.COLBERT_TOP_K
+                )
+
+                # LLM 병렬 호출 준비
+                yield create_sse_data({
+                    "type": SSEType.PROGRESS,
+                    "percent": 40,
+                    "message": f"질문 {question_count}개 병렬 분석 중..."
+                })
+
+                all_references = []
+                llm_tasks = []
+
+                for i, q in enumerate(questions):
+                    search_results = batch_results[i] if i < len(batch_results) else []
+
+                    filtered_chunks = [
+                        r for r in search_results
+                        if r.metadata.get("source") == target_filename
+                    ]
+
+                    if filtered_chunks:
+                        for chunk in filtered_chunks:
+                            ref = {
+                                "source": chunk.metadata.get("source", ""),
+                                "page": chunk.metadata.get("page", 0)
+                            }
+                            if ref not in all_references:
+                                all_references.append(ref)
+
+                        context = "\n\n---\n\n".join([c.content for c in filtered_chunks])
+                        payload = document_summary_prompt_builder.build_qa_payload(q["question"], context)
+                        llm_tasks.append((q["key"], llm_client.chat_completions(payload)))
+                    else:
+                        llm_tasks.append((q["key"], None))
+
+                # LLM 병렬 실행
+                qa_results = {}
+                async_tasks = [task for key, task in llm_tasks if task is not None]
+                task_keys = [key for key, task in llm_tasks if task is not None]
+
+                if async_tasks:
+                    responses = await asyncio.gather(*async_tasks, return_exceptions=True)
+                    for key, response in zip(task_keys, responses):
+                        if isinstance(response, Exception):
+                            logger.error(f"LLM 호출 실패 ({key}): {response}")
+                            qa_results[key] = "분석 실패"
+                        else:
+                            qa_results[key] = llm_client.extract_content(response)
+
+                for key, task in llm_tasks:
+                    if task is None:
+                        qa_results[key] = "해당 정보 없음"
+
+                # 최종 통합
+                yield create_sse_data({
+                    "type": SSEType.PROGRESS,
+                    "percent": 85,
+                    "message": "분석 결과 통합 중..."
+                })
+
+                merge_payload = document_summary_prompt_builder.build_merge_payload(qa_results, target_filename)
+                merge_response = await llm_client.chat_completions(merge_payload)
+                summary = llm_client.extract_content(merge_response)
+
+            else:
+                # ===== 20페이지 미만: 단순 검색 방식 =====
+                yield create_sse_data({
+                    "type": SSEType.PROGRESS,
+                    "percent": 20,
+                    "message": f"문서 검색 중 ({total_pages}페이지)..."
+                })
+
+                # 단일 검색 쿼리
+                search_query = f"{target_filename} 요약"
+                search_results = await model_server_client.colbert_search(
+                    invokeId, search_query, top_k=settings.COLBERT_TOP_K
+                )
+
+                filtered_chunks = [
+                    r for r in search_results
+                    if r.metadata.get("source") == target_filename
+                ]
+
+                all_references = []
+                if filtered_chunks:
+                    for chunk in filtered_chunks:
+                        ref = {
+                            "source": chunk.metadata.get("source", ""),
+                            "page": chunk.metadata.get("page", 0)
+                        }
+                        if ref not in all_references:
+                            all_references.append(ref)
+
+                    context = "\n\n---\n\n".join([c.content for c in filtered_chunks])
+                else:
+                    yield create_sse_data({"type": SSEType.ERROR, "detail": "문서 내용을 찾을 수 없습니다."})
+                    return
+
+                yield create_sse_data({
+                    "type": SSEType.PROGRESS,
+                    "percent": 50,
+                    "message": "요약 생성 중..."
+                })
+
+                payload = document_summary_prompt_builder.build_simple_summary_payload(context, target_filename)
+                response = await llm_client.chat_completions(payload)
+                summary = llm_client.extract_content(response)
+
+            # 레퍼런스 전송
+            if all_references:
+                all_references.sort(key=lambda x: x.get("page", 0))
+                yield create_sse_data({"type": SSEType.REFERENCES, "docs": all_references})
+
+            # 답변 스트리밍
+            chunk_size = 6
+            for i in range(0, len(summary), chunk_size):
+                yield create_sse_data({"type": SSEType.ANSWER, "content": summary[i:i + chunk_size]})
+
+            yield create_sse_data({"type": SSEType.DONE})
+
+        except Exception as e:
+            logger.error(f"[Document Summary Error] {e}")
+            yield create_sse_data({"type": SSEType.ERROR, "detail": str(e)})
+
+    return create_sse_response(event_stream())

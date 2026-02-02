@@ -8,7 +8,7 @@ python-multipart       # 파일 업로드(Form/File) 필수
 httpx                  # LLM/STT/Model 서버 통신
 
 # 3. Database
-redis                  # 캐싱, 대화 히스토리, 청크 저장소
+redis                  # 대화 히스토리
 neo4j                  # LightRAG용 Graph DB 드라이버
 
 # 4. LangChain / LangGraph
@@ -16,14 +16,13 @@ langchain-core         # 메시지, 프롬프트, 문서 타입
 langchain-neo4j        # Neo4j 그래프 연동
 langgraph              # LangGraph 에이전트 워크플로우
 
-# 5. RAG & Search
-pylate                 # ColBERT + Voyager 로컬 인덱스 검색
-numpy                  # 벡터 연산
-
-# 6. Document Processing
+# 5. Document Processing
 jinja2                 # HWPX 문서 템플릿 처리
 markitdown             # Office/텍스트 파일 → 마크다운 변환
 pdf4llm                # PDF → 마크다운 변환 (페이지 단위)
+
+# 6. Tokenizer
+tiktoken               # 토큰 수 측정 (긴 텍스트 청크 분할용)
 
 # 7. Type Hints
 typing_extensions      # TypedDict 등 확장 타입

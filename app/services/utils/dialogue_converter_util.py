@@ -1,6 +1,10 @@
 import csv
 import re
+import time
+import logging
 from io import StringIO
+
+logger = logging.getLogger(__name__)
 
 def clean_content(content: str, original_filename: str) -> tuple[str, bool]:
     """
@@ -29,6 +33,9 @@ def convert_csv_to_dialogue(csv_content: bytes) -> str:
     :param csv_content: CSV 파일의 바이트 내용
     :return: 변환된 대화록 문자열
     """
+    start_time = time.time()
+    logger.info(f"[Dialogue] CSV 파싱 시작 (size: {len(csv_content)} bytes)")
+
     try:
         # UTF-8로 디코딩 시도, 실패 시 CP949로 시도
         try:
@@ -70,20 +77,28 @@ def convert_csv_to_dialogue(csv_content: bytes) -> str:
         prev_is_attachment = False
 
     for row in reader:
-        talker_name = row.get('sTalkerName', '').strip()
-        formatted_date = row.get('formatted_date', '').strip()
-        content = row.get('sTalkerContent', '')
-        original_filename = row.get('sOriginalFileName', '').strip()
+        talker_name = (row.get('sTalkerName') or '').strip()
+        formatted_date = (row.get('formatted_date') or '').strip()
+        content = row.get('sTalkerContent') or ''
+        original_filename = (row.get('sOriginalFileName') or '').strip()
 
         cleaned_content, is_attachment = clean_content(content, original_filename)
 
         if not cleaned_content:
             continue
 
-        date_only = formatted_date.split(' ')[0] if formatted_date else ''
+        # 날짜 포맷: 20260120124030008 (YYYYMMDDHHmmssSSS)
+        date_only = ''
         time_only = ''
-        if ' ' in formatted_date:
-            time_only = formatted_date.split(' ')[1]
+        if formatted_date and len(formatted_date) >= 14:
+            year = formatted_date[0:4]
+            month = formatted_date[4:6]
+            day = formatted_date[6:8]
+            hour = formatted_date[8:10]
+            minute = formatted_date[10:12]
+            second = formatted_date[12:14]
+            date_only = f"{year}-{month}-{day}"
+            time_only = f"{hour}:{minute}:{second}"
 
         if date_only and date_only != current_date:
             flush_message()
@@ -102,6 +117,10 @@ def convert_csv_to_dialogue(csv_content: bytes) -> str:
             prev_is_attachment = is_attachment
 
     flush_message()
+
+    duration = time.time() - start_time
+    logger.info(f"[Dialogue] CSV 파싱 완료: {len(dialogue_lines)}줄, {duration:.2f}초")
+
     return '\n'.join(dialogue_lines)
 
 
@@ -112,7 +131,9 @@ def split_dialogue_by_date(csv_content: bytes) -> list[dict[str, str]]:
     :param csv_content: CSV 파일의 바이트 내용
     :return: [{"date": "2025-01-15", "text": "대화 내용..."}, ...] 형태의 리스트
     """
+    logger.info("[Dialogue] split_dialogue_by_date 시작")
     dialogue_text = convert_csv_to_dialogue(csv_content)
+    logger.info("[Dialogue] 날짜별 분리 시작")
 
     result = []
     current_date = None
@@ -137,4 +158,5 @@ def split_dialogue_by_date(csv_content: bytes) -> list[dict[str, str]]:
             "text": '\n'.join(current_lines).strip()
         })
 
+    logger.info(f"[Dialogue] 날짜별 분리 완료: {len(result)}개 세그먼트")
     return result

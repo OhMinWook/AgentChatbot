@@ -31,7 +31,7 @@ async def call_ai(
     Returns:
         AI 응답 텍스트
     """
-    url = f"{settings.VLLM_BASE_URL}/v1/chat/completions"
+    url = f"{settings.MODEL_SERVER_URL}/v1/chat/completions"
 
     payload = {
         "model": settings.VLLM_MODEL,
@@ -73,7 +73,7 @@ async def call_ai_with_history(
     Returns:
         AI 응답 텍스트
     """
-    url = f"{settings.VLLM_BASE_URL}/v1/chat/completions"
+    url = f"{settings.MODEL_SERVER_URL}/v1/chat/completions"
 
     all_messages = [{"role": "system", "content": system_prompt}] + messages
 
@@ -114,7 +114,7 @@ async def call_ai_stream(
     """
     import json
 
-    url = f"{settings.VLLM_BASE_URL}/v1/chat/completions"
+    url = f"{settings.MODEL_SERVER_URL}/v1/chat/completions"
 
 
     payload = {
@@ -165,7 +165,7 @@ def interactive_mode():
     print("디버그용 AI 호출기 - 대화형 모드")
     print("=" * 60)
     print(f"Model: {settings.VLLM_MODEL}")
-    print(f"Server: {settings.VLLM_BASE_URL}")
+    print(f"Server: {settings.MODEL_SERVER_URL}")
     print("=" * 60)
 
     # 시스템 프롬프트 입력
@@ -220,7 +220,7 @@ async def quick_test(system_prompt: str, user_message: str):
     print("디버그용 AI 호출기 - 빠른 테스트")
     print("=" * 60)
     print(f"Model: {settings.VLLM_MODEL}")
-    print(f"Server: {settings.VLLM_BASE_URL}")
+    print(f"Server: {settings.MODEL_SERVER_URL}")
     print("=" * 60)
     print(f"\n[System Prompt]\n{system_prompt}\n")
     print(f"[User Message]\n{user_message}\n")

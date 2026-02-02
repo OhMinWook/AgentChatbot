@@ -1,16 +1,40 @@
 """통화 요약 API - SSE 기반 실시간 진행률 제공"""
 import time
-from fastapi import APIRouter, File, UploadFile, HTTPException
+from enum import Enum
 from typing import AsyncGenerator
 
-from app.services.clients.stt_client import stt_client
-from app.services.clients.llm_client import llm_client
+from fastapi import APIRouter, File, UploadFile, HTTPException
+
+from app.services.api_clients.stt_client import stt_client
+from app.services.api_clients.llm_client import llm_client
 from app.services.prompt_builders.callsummary_prompt_builder import callsummary_prompt_builder
-from app.schemas.summary_job import SummaryStage, ProgressEvent, SummaryResult
-from app.services.utils.sse_utils import create_sse_message, create_sse_response
+from app.services.utils.sse_utils import create_sse_data, create_sse_response, SSEType
 from app.services.utils.file_utils import save_upload_file
 
+
+class SummaryStage(str, Enum):
+    """통화 요약 진행 단계"""
+    RECEIVING = "파일 수신"
+    STT_START = "음성 인식 시작"
+    STT_PROCESSING = "음성 인식 처리 중"
+    STT_COMPLETE = "음성 인식 완료"
+    SUMMARY_START = "요약 생성 시작"
+    SUMMARY_PROCESSING = "요약 생성 중"
+    COMPLETE = "완료"
+    ERROR = "오류 발생"
+
+
 router = APIRouter()
+
+
+def _progress(percent: int, stage: SummaryStage, message: str) -> str:
+    """진행률 SSE 메시지 생성 헬퍼"""
+    return create_sse_data({
+        "type": SSEType.PROGRESS,
+        "percent": percent,
+        "stage": stage.value,
+        "message": message
+    })
 
 
 @router.post("/call-summary/{invoke_id}", summary="통화 요약 (SSE 실시간 진행률)")
@@ -32,97 +56,80 @@ async def summarize_call(
 
         try:
             # ========== 1. 파일 수신 및 저장 (0%) ==========
-            yield create_sse_message("progress", ProgressEvent(
-                percent=0,
-                stage=SummaryStage.RECEIVING,
-                message="오디오 파일 수신 중..."
-            ).model_dump())
+            yield _progress(0, SummaryStage.RECEIVING, "오디오 파일 수신 중...")
 
-            # 파일 저장 (Path Traversal 방지 포함)
             saved_path, _ = await save_upload_file(
                 audio, "call_summary", invoke_id,
                 default_filename="audio.wav"
             )
 
-            yield create_sse_message("progress", ProgressEvent(
-                percent=10,
-                stage=SummaryStage.RECEIVING,
-                message=f"파일 저장 완료: {audio.filename or 'audio.wav'}"
-            ).model_dump())
+            yield _progress(10, SummaryStage.RECEIVING, f"파일 저장 완료: {audio.filename or 'audio.wav'}")
 
             # ========== 2. STT 처리 (10% → 50%) ==========
-            yield create_sse_message("progress", ProgressEvent(
-                percent=15,
-                stage=SummaryStage.STT_START,
-                message="음성 인식 서버에 요청 중..."
-            ).model_dump())
-
-            yield create_sse_message("progress", ProgressEvent(
-                percent=25,
-                stage=SummaryStage.STT_PROCESSING,
-                message="음성을 텍스트로 변환 중..."
-            ).model_dump())
+            yield _progress(15, SummaryStage.STT_START, "음성 인식 서버에 요청 중...")
+            yield _progress(25, SummaryStage.STT_PROCESSING, "음성을 텍스트로 변환 중...")
 
             transcript = await stt_client.transcribe(saved_path)
 
             if not transcript:
                 raise ValueError("STT 결과가 비어있습니다. 오디오 파일을 확인해주세요.")
 
-            yield create_sse_message("progress", ProgressEvent(
-                percent=50,
-                stage=SummaryStage.STT_COMPLETE,
-                message=f"음성 인식 완료 (텍스트 길이: {len(transcript)}자)"
-            ).model_dump())
+            yield _progress(50, SummaryStage.STT_COMPLETE, f"음성 인식 완료 (텍스트 길이: {len(transcript)}자)")
 
             # ========== 3. LLM 요약 (50% → 95%) ==========
-            yield create_sse_message("progress", ProgressEvent(
-                percent=55,
-                stage=SummaryStage.SUMMARY_START,
-                message="LLM 요약 요청 중..."
-            ).model_dump())
+            yield _progress(55, SummaryStage.SUMMARY_START, "LLM 요약 요청 중...")
 
-            yield create_sse_message("progress", ProgressEvent(
-                percent=70,
-                stage=SummaryStage.SUMMARY_PROCESSING,
-                message="통화 내용 분석 및 요약 생성 중..."
-            ).model_dump())
+            if callsummary_prompt_builder.needs_chunking(transcript):
+                chunks = callsummary_prompt_builder.split_into_chunks(transcript)
+                total_chunks = len(chunks)
 
-            llm_payload = callsummary_prompt_builder.build_summary_payload(transcript)
-            llm_response = await llm_client.chat_completions(llm_payload)
+                yield _progress(60, SummaryStage.SUMMARY_PROCESSING, f"긴 통화록 감지, {total_chunks}개 구간으로 분할 처리 중...")
 
-            summary = llm_client.extract_content(llm_response)
+                previous_summary = None
+                chunk_summaries = []
 
-            yield create_sse_message("progress", ProgressEvent(
-                percent=95,
-                stage=SummaryStage.SUMMARY_PROCESSING,
-                message="요약 생성 완료, 결과 정리 중..."
-            ).model_dump())
+                for i, chunk in enumerate(chunks):
+                    progress = 60 + int((i + 1) / total_chunks * 30)
+                    yield _progress(progress, SummaryStage.SUMMARY_PROCESSING, f"구간 {i + 1}/{total_chunks} 요약 중...")
+
+                    chunk_payload = callsummary_prompt_builder.build_chunk_payload(
+                        chunk, i, total_chunks, previous_summary
+                    )
+                    chunk_response = await llm_client.chat_completions(chunk_payload)
+                    previous_summary = llm_client.extract_content(chunk_response)
+                    chunk_summaries.append(previous_summary)
+
+                yield _progress(92, SummaryStage.SUMMARY_PROCESSING, "구간별 요약 통합 중...")
+
+                combined = "\n\n---\n\n".join(chunk_summaries)
+                final_payload = callsummary_prompt_builder.build_final_summary_payload(combined)
+                final_response = await llm_client.chat_completions(final_payload)
+                summary = llm_client.extract_content(final_response)
+            else:
+                yield _progress(70, SummaryStage.SUMMARY_PROCESSING, "통화 내용 분석 및 요약 생성 중...")
+
+                llm_payload = callsummary_prompt_builder.build_summary_payload(transcript)
+                llm_response = await llm_client.chat_completions(llm_payload)
+                summary = llm_client.extract_content(llm_response)
+
+            yield _progress(95, SummaryStage.SUMMARY_PROCESSING, "요약 생성 완료, 결과 정리 중...")
 
             # ========== 4. 완료 (100%) ==========
             duration = time.time() - start_time
 
-            yield create_sse_message("progress", ProgressEvent(
-                percent=100,
-                stage=SummaryStage.COMPLETE,
-                message=f"처리 완료 (소요시간: {duration:.1f}초)"
-            ).model_dump())
+            yield _progress(100, SummaryStage.COMPLETE, f"처리 완료 (소요시간: {duration:.1f}초)")
 
             # 최종 결과 전송
-            result = SummaryResult(
-                transcript=transcript,
-                summary=summary,
-                duration_seconds=round(duration, 2)
-            )
-            yield create_sse_message("result", result.model_dump())
+            yield create_sse_data({
+                "type": SSEType.RESULT,
+                "transcript": transcript,
+                "summary": summary,
+                "duration_seconds": round(duration, 2)
+            })
 
         except Exception as e:
-            # 에러 발생 시
-            yield create_sse_message("progress", ProgressEvent(
-                percent=-1,
-                stage=SummaryStage.ERROR,
-                message=str(e)
-            ).model_dump())
-            yield create_sse_message("error", {"detail": str(e)})
+            yield _progress(-1, SummaryStage.ERROR, str(e))
+            yield create_sse_data({"type": SSEType.ERROR, "detail": str(e)})
 
     return create_sse_response(event_stream())
 
@@ -139,34 +146,54 @@ async def summarize_call_sync(
     start_time = time.time()
 
     try:
-        # 1. 파일 저장 (Path Traversal 방지)
         saved_path, _ = await save_upload_file(
             audio, "call_summary", invoke_id,
             default_filename="audio.wav"
         )
 
-        # 2. STT
         transcript = await stt_client.transcribe(saved_path)
         if not transcript:
             raise HTTPException(status_code=400, detail="STT 결과가 비어있습니다.")
 
-        # 3. LLM 요약
-        llm_payload = callsummary_prompt_builder.build_summary_payload(transcript)
-        llm_response = await llm_client.chat_completions(llm_payload)
-        summary = llm_client.extract_content(llm_response)
+        summary = await _summarize_transcript(transcript)
 
-        # 4. 결과 반환
         duration = time.time() - start_time
-        return SummaryResult(
-            transcript=transcript,
-            summary=summary,
-            duration_seconds=round(duration, 2)
-        )
+        return {
+            "transcript": transcript,
+            "summary": summary,
+            "duration_seconds": round(duration, 2)
+        }
 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _summarize_transcript(transcript: str) -> str:
+    """통화록 요약 (긴 텍스트는 청크 분할 처리)"""
+    if callsummary_prompt_builder.needs_chunking(transcript):
+        chunks = callsummary_prompt_builder.split_into_chunks(transcript)
+
+        previous_summary = None
+        chunk_summaries = []
+
+        for i, chunk in enumerate(chunks):
+            chunk_payload = callsummary_prompt_builder.build_chunk_payload(
+                chunk, i, len(chunks), previous_summary
+            )
+            chunk_response = await llm_client.chat_completions(chunk_payload)
+            previous_summary = llm_client.extract_content(chunk_response)
+            chunk_summaries.append(previous_summary)
+
+        combined = "\n\n---\n\n".join(chunk_summaries)
+        final_payload = callsummary_prompt_builder.build_final_summary_payload(combined)
+        final_response = await llm_client.chat_completions(final_payload)
+        return llm_client.extract_content(final_response)
+    else:
+        llm_payload = callsummary_prompt_builder.build_summary_payload(transcript)
+        llm_response = await llm_client.chat_completions(llm_payload)
+        return llm_client.extract_content(llm_response)
 
 
 @router.post("/call-summary-debug/{invoke_id}", summary="통화 요약 디버그 (텍스트 직접 입력)")
@@ -184,25 +211,20 @@ async def summarize_call_debug(
     start_time = time.time()
 
     try:
-        # 1. 텍스트 파일 읽기
         content = await transcript_file.read()
         transcript = content.decode("utf-8")
 
         if not transcript.strip():
             raise HTTPException(status_code=400, detail="텍스트 파일이 비어있습니다.")
 
-        # 2. LLM 요약 (STT 건너뜀)
-        llm_payload = callsummary_prompt_builder.build_summary_payload(transcript)
-        llm_response = await llm_client.chat_completions(llm_payload)
-        summary = llm_client.extract_content(llm_response)
+        summary = await _summarize_transcript(transcript)
 
-        # 3. 결과 반환
         duration = time.time() - start_time
-        return SummaryResult(
-            transcript=transcript,
-            summary=summary,
-            duration_seconds=round(duration, 2)
-        )
+        return {
+            "transcript": transcript,
+            "summary": summary,
+            "duration_seconds": round(duration, 2)
+        }
 
     except HTTPException:
         raise

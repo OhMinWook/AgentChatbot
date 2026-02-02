@@ -2,13 +2,11 @@
 LangGraph 도구 정의
 
 ColBERT 검색을 LangGraph 도구로 래핑
-- 모델 서버: 인코딩만 담당 (Stateless)
-- 게이트웨이: local_index_service로 검색
 """
 
 import logging
 from typing import List, Dict, Any
-from app.services.rag.local_index_service import local_index_service
+from app.services.api_clients.model_server_client import model_server_client
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -22,7 +20,7 @@ class ColBERTSearchTool:
 
     async def search(self, query: str, top_k: int = None, filter_filename: str = None) -> Dict[str, Any]:
         """
-        ColBERT 검색 수행 (로컬 Voyager 인덱스 사용)
+        ColBERT 검색 수행
 
         Returns:
             {
@@ -36,14 +34,13 @@ class ColBERTSearchTool:
         logger.info(f"[Search] query: {query[:50]}...")
         logger.debug(f"[Search] invoke_id: {self.invoke_id}, top_k: {k}, filter: {filter_filename}")
 
-        # 로컬 인덱스에서 검색
-        search_results = await local_index_service.search(
+        search_results = await model_server_client.colbert_search(
             invoke_id=self.invoke_id,
             query=query,
             top_k=k
         )
 
-        logger.info(f"[Search] {len(search_results)}개 결과")
+        logger.info(f"[Search] 검색 결과: {len(search_results)}개")
 
         if not search_results:
             return {"context": None, "references": [], "results": []}
@@ -59,28 +56,45 @@ class ColBERTSearchTool:
             for r in search_results
         ]
 
-        # 결과 필터링 및 포맷팅
-        valid_docs = []
+        # 필터링
+        filtered_results = []
         references = []
-        seen_contents = set()
 
         for doc in results:
-            score = doc.get("score", 0)
-            logger.debug(f"[Score] {score:.2f}")
-
-            # score 임계값 (필요시 조정)
-            if score < 17.0:
-                continue
-
-            content = doc.get("content", "").strip()
             metadata = doc.get("metadata", {})
             source = metadata.get("source", "unknown")
             page = metadata.get("page", 0)
 
-            # [파일명 필터링]
+            # 파일명 필터링
             if filter_filename:
                 if filter_filename not in source and source not in filter_filename:
                     continue
+
+            filtered_results.append(doc)
+
+            ref = {"source": source, "page": page}
+            if ref not in references:
+                references.append(ref)
+
+        if not filtered_results:
+            return {"context": None, "references": [], "results": results}
+
+        context = self._format_context(filtered_results)
+        return {"context": context, "references": references, "results": filtered_results}
+
+    def _format_context(self, results: List[Dict]) -> str:
+        """검색 결과를 XML 컨텍스트로 포맷팅"""
+        if not results:
+            return None
+
+        valid_docs = []
+        seen_contents = set()
+
+        for doc in results:
+            content = doc.get("content", "").strip()
+            metadata = doc.get("metadata", {})
+            source = metadata.get("source", "unknown")
+            page = metadata.get("page", 0)
 
             # 중복 제거
             content_key = content[:300]
@@ -88,28 +102,21 @@ class ColBERTSearchTool:
                 continue
             seen_contents.add(content_key)
 
-            # 문서 포맷팅 (키워드 정보는 content에 이미 포함됨)
             formatted_doc = f'<document source="{source}" page="{page}">\n{content}\n</document>'
             valid_docs.append(formatted_doc)
 
-            ref = {"source": source, "page": page}
-            if ref not in references:
-                references.append(ref)
-
         if not valid_docs:
-            return {"context": None, "references": [], "results": results}
+            return None
 
-        xml_context = "<documents>\n" + "\n".join(valid_docs) + "\n</documents>"
-        return {"context": xml_context, "references": references, "results": results}
-
+        return "<documents>\n" + "\n".join(valid_docs) + "\n</documents>"
 
     async def search_batch(self, queries: List[str], top_k: int = None, filter_filename: str = None) -> List[Dict[str, Any]]:
         """
-        여러 쿼리 배치 검색 (로컬 Voyager 인덱스 사용)
+        여러 쿼리 배치 검색
 
         Returns:
             [
-                {"query": "...", "context": "...", "references": [...]},
+                {"query": "...", "context": "...", "references": [...], "results": [...]},
                 ...
             ]
         """
@@ -117,8 +124,7 @@ class ColBERTSearchTool:
 
         logger.info(f"[Batch Search] {len(queries)}개 쿼리, invoke_id: {self.invoke_id}, filter: {filter_filename}")
 
-        # 로컬 인덱스에서 배치 검색
-        batch_results = await local_index_service.search_batch(
+        batch_results = await model_server_client.colbert_search_batch(
             invoke_id=self.invoke_id,
             queries=queries,
             top_k=k
@@ -135,60 +141,43 @@ class ColBERTSearchTool:
                 all_search_results.append({
                     "query": query,
                     "context": None,
-                    "references": []
+                    "references": [],
+                    "results": []
                 })
                 continue
 
-            valid_docs = []
+            # SearchResult → dict 변환
+            results_dicts = []
             references = []
-            seen_contents = set()
 
-            is_first = True
             for r in search_results:
-                score = r.score
-                content = r.content.strip()
-                if is_first:
-                    logger.debug(f"  [Q{idx+1}] score: {score:.2f} | 전체 내용:\n{content}")
-                    is_first = False
-                else:
-                    logger.debug(f"  [Q{idx+1}] score: {score:.2f} | {content[:80]}...")
-
-                if score < 17.0:
-                    logger.debug(f"  [Q{idx+1}] score {score:.2f} < 17.0, 제외")
-                    continue
                 source = r.metadata.get("source", "unknown")
                 page = r.metadata.get("page", 0)
 
-                # [파일명 필터링]
+                # 파일명 필터링
                 if filter_filename:
                     if filter_filename not in source and source not in filter_filename:
                         continue
 
-                content_key = content[:300]
-                if content_key in seen_contents:
-                    continue
-                seen_contents.add(content_key)
-
-                formatted_doc = f'<document source="{source}" page="{page}">\n{content}\n</document>'
-                valid_docs.append(formatted_doc)
+                results_dicts.append({
+                    "doc_id": r.doc_id,
+                    "score": r.score,
+                    "content": r.content,
+                    "metadata": r.metadata
+                })
 
                 ref = {"source": source, "page": page}
                 if ref not in references:
                     references.append(ref)
 
-            if valid_docs:
-                xml_context = "<documents>\n" + "\n".join(valid_docs) + "\n</documents>"
-                all_search_results.append({
-                    "query": query,
-                    "context": xml_context,
-                    "references": references
-                })
-            else:
-                all_search_results.append({
-                    "query": query,
-                    "context": None,
-                    "references": []
-                })
+            context = self._format_context(results_dicts) if results_dicts else None
+
+            all_search_results.append({
+                "query": query,
+                "context": context,
+                "references": references,
+                "results": results_dicts
+            })
 
         return all_search_results
 

@@ -10,8 +10,9 @@ from typing import AsyncGenerator, Dict, Any, Optional
 from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 
-from app.services.rag_agent.graph import create_rag_graph
-from app.services.rag_agent.nodes import stream_llm_tokens
+from app.services.chat_agent.graph import create_rag_graph
+from app.services.chat_agent.nodes import stream_llm_tokens
+from app.services.utils.sse_utils import SSEType
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +51,13 @@ class SSEGraphAdapter:
             content = streaming_payload.get("content", "")
             for i in range(0, len(content), _CHUNK_SIZE):
                 chunk = content[i:i + _CHUNK_SIZE]
-                yield self._format_sse({"type": "answer", "content": chunk})
+                yield self._format_sse({"type": SSEType.ANSWER, "content": chunk})
         else:
             # 복수 답변: vLLM SSE 스트리밍으로 실시간 토큰 전송
             messages = streaming_payload.get("messages", [])
             max_tokens = streaming_payload.get("max_tokens", 2048)
             async for token in stream_llm_tokens(messages, max_tokens):
-                yield self._format_sse({"type": "answer", "content": token})
+                yield self._format_sse({"type": SSEType.ANSWER, "content": token})
 
     # ------------------------------------------------------------------
     # 공통: 그래프 실행 결과에서 답변/레퍼런스 SSE 전송
@@ -70,12 +71,21 @@ class SSEGraphAdapter:
         # 레퍼런스 전송
         agent_answers = final_state.get("agent_answers", [])
         all_refs = []
+        all_rag_docs = []
         for ans in agent_answers:
             for ref in ans.get("sources", []):
                 if ref not in all_refs:
                     all_refs.append(ref)
+            # RAG 문서 수집 (디버깅용)
+            for doc in ans.get("rag_docs", []):
+                all_rag_docs.append(doc)
+
         if all_refs:
-            yield self._format_sse({"type": "references", "docs": all_refs})
+            yield self._format_sse({"type": SSEType.REFERENCES, "docs": all_refs})
+
+        # RAG 문서 전체 전송 (디버깅용)
+        if all_rag_docs:
+            yield self._format_sse({"type": SSEType.RAG_DOCUMENTS, "documents": all_rag_docs})
 
         # 토큰 스트리밍 답변
         if streaming_payload:
@@ -91,7 +101,7 @@ class SSEGraphAdapter:
                     break
             if final_answer:
                 for i in range(0, len(final_answer), _CHUNK_SIZE):
-                    yield self._format_sse({"type": "answer", "content": final_answer[i:i + _CHUNK_SIZE]})
+                    yield self._format_sse({"type": SSEType.ANSWER, "content": final_answer[i:i + _CHUNK_SIZE]})
 
     # ------------------------------------------------------------------
     # invoke_with_sse
@@ -127,7 +137,7 @@ class SSEGraphAdapter:
         }
 
         try:
-            yield self._format_sse({"type": "progress", "step": "시작"})
+            yield self._format_sse({"type": SSEType.PROGRESS, "step": "시작"})
 
             final_state = None
             sent_progress = set()  # 중복 방지
@@ -138,14 +148,14 @@ class SSEGraphAdapter:
                 # 대화 요약 진행 (1회만)
                 if event.get("conversation_summary") and "summary" not in sent_progress:
                     sent_progress.add("summary")
-                    yield self._format_sse({"type": "progress", "step": "대화 맥락 분석 중"})
+                    yield self._format_sse({"type": SSEType.PROGRESS, "step": "대화 맥락 분석 중"})
 
                 # 질문 분석 완료 (1회만)
                 if event.get("rewritten_questions") and "analyzed" not in sent_progress:
                     sent_progress.add("analyzed")
                     questions = event.get("rewritten_questions", [])
                     yield self._format_sse({
-                        "type": "progress",
+                        "type": SSEType.PROGRESS,
                         "step": f"질문 분석 완료 ({len(questions)}개 질문)"
                     })
 
@@ -155,7 +165,7 @@ class SSEGraphAdapter:
                     self._pending_threads[invoke_id] = thread_id
                     clarification = final_state.get("clarification_message", "질문을 더 구체적으로 해주세요.")
                     yield self._format_sse({
-                        "type": "clarification_needed",
+                        "type": SSEType.CLARIFICATION,
                         "message": clarification,
                         "thread_id": thread_id
                     })
@@ -164,11 +174,11 @@ class SSEGraphAdapter:
                 async for chunk in self._emit_final_answer(final_state):
                     yield chunk
 
-            yield self._format_sse({"type": "done"})
+            yield self._format_sse({"type": SSEType.DONE})
 
         except Exception as e:
             logger.exception(f"Graph execution error: {e}")
-            yield self._format_sse({"type": "error", "message": str(e)})
+            yield self._format_sse({"type": SSEType.ERROR, "message": str(e)})
 
     # ------------------------------------------------------------------
     # continue_with_sse
@@ -187,7 +197,7 @@ class SSEGraphAdapter:
             pending = self._pending_threads.get(invoke_id)
             if pending != thread_id:
                 yield self._format_sse({
-                    "type": "error",
+                    "type": SSEType.ERROR,
                     "message": "세션이 만료되었습니다. 새로 질문해 주세요."
                 })
                 return
@@ -199,7 +209,7 @@ class SSEGraphAdapter:
 
             if not current_state or not current_state.values:
                 yield self._format_sse({
-                    "type": "error",
+                    "type": SSEType.ERROR,
                     "message": "세션을 찾을 수 없습니다."
                 })
                 return
@@ -214,7 +224,7 @@ class SSEGraphAdapter:
                 }
             )
 
-            yield self._format_sse({"type": "progress", "step": "명확화 응답 처리 중"})
+            yield self._format_sse({"type": SSEType.PROGRESS, "step": "명확화 응답 처리 중"})
 
             final_state = None
             async for event in self.graph.astream(None, config, stream_mode="values"):
@@ -224,7 +234,7 @@ class SSEGraphAdapter:
                 if final_state.get("awaiting_human_input"):
                     clarification = final_state.get("clarification_message", "조금 더 구체적으로 설명해 주세요.")
                     yield self._format_sse({
-                        "type": "clarification_needed",
+                        "type": SSEType.CLARIFICATION,
                         "message": clarification,
                         "thread_id": thread_id
                     })
@@ -233,11 +243,11 @@ class SSEGraphAdapter:
                 async for chunk in self._emit_final_answer(final_state):
                     yield chunk
 
-            yield self._format_sse({"type": "done"})
+            yield self._format_sse({"type": SSEType.DONE})
 
         except Exception as e:
             logger.exception(f"Graph continuation error: {e}")
-            yield self._format_sse({"type": "error", "message": str(e)})
+            yield self._format_sse({"type": SSEType.ERROR, "message": str(e)})
 
     def _format_sse(self, data: Dict[str, Any]) -> bytes:
         json_str = json.dumps(data, ensure_ascii=False)

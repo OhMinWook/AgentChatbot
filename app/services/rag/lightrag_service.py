@@ -7,8 +7,8 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
 
 from app.core.config import settings
-from app.services.clients.llm_client import llm_client
-from app.services.clients.model_server_client import model_server_client
+from app.services.api_clients.llm_client import llm_client
+from app.services.api_clients.model_server_client import model_server_client
 
 logger = logging.getLogger(__name__)
 

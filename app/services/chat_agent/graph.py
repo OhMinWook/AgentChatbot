@@ -6,15 +6,15 @@ import logging
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
-from app.services.rag_agent.graph_state import MainState
-from app.services.rag_agent.nodes import (
+from app.services.chat_agent.graph_state import MainState
+from app.services.chat_agent.nodes import (
     summarize_node,
     analyze_rewrite_node,
     human_input_node,
     process_question_node,
     aggregate_node
 )
-from app.services.rag_agent.edges import (
+from app.services.chat_agent.edges import (
     route_after_analyze,
     route_after_human_input
 )

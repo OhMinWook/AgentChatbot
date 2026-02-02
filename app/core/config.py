@@ -2,7 +2,8 @@ from pydantic import BaseModel
 import os
 
 class Settings(BaseModel):
-    VLLM_BASE_URL: str = os.getenv("VLLM_BASE_URL", "http://213.173.111.111:34320")
+    # 통합 Model Server URL (LLM + STT + ColBERT)
+    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://213.173.111.112:36851")
     VLLM_MODEL: str = os.getenv("VLLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B-AWQ")
 
     # 운영에서 흔히 필요한 제한값들 (MVP 기본)
@@ -24,21 +25,16 @@ class Settings(BaseModel):
     # [파일 업로드 경로] 프로젝트 루트에 'uploaded_files' 라는 폴더를 기본값으로 사용
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploaded_files")
 
-    # [STT 설정] 음성인식 서버 URL
-    STT_BASE_URL: str = os.getenv("STT_BASE_URL", "http://64.247.196.119:13850")
 
-    # [모델 서버 설정] 임베딩, Reranker 등을 위한 외부 모델 서버 URL
-    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://195.26.233.78:42412")
+    # [ColBERT 설정] 모델 서버 원격 인덱스
+    COLBERT_TOP_K: int = 3  # ColBERT 검색 상위 개수
 
-    # [RAG 설정] 임베딩 차원 및 인덱스 이름
-    EMBEDDING_DIMS: int = 1024
-    RAG_INDEX_NAME: str = "otinus_knowledge_index"
-
-    # [ColBERT 설정] Jina ColBERT v2 + Voyager 로컬 인덱스
-    COLBERT_TOP_K: int = 6  # ColBERT 검색 상위 개수
+    # [청크 설정]
+    CHUNK_SIZE: int = 1500
+    CHUNK_OVERLAP: int = 200
 
     # [Polaris 설정] Polaris 사용 여부 (False일 경우 pdf4llm/markitdown 등 대체재 사용)
-    POLARIS_ENABLED: bool = True
+    POLARIS_ENABLED: bool = False
 
     # [키워드 추출 서버 설정] 4B LLM 서버 (없으면 MODEL_SERVER_URL 사용)
     KEYWORD_SERVER_URL: str = os.getenv("KEYWORD_SERVER_URL", "")
@@ -49,9 +45,10 @@ class Settings(BaseModel):
     NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "password")  # 초기 비밀번호 (변경 필요시 수정)
 
     # [타임아웃 설정] 각 클라이언트 요청 타임아웃 (초)
-    LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "90"))
+    LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "180"))
     STT_TIMEOUT: float = float(os.getenv("STT_TIMEOUT", "300"))
-    MODEL_SERVER_TIMEOUT: float = float(os.getenv("MODEL_SERVER_TIMEOUT", "600"))
+    MODEL_SERVER_EMBED_TIMEOUT: float = float(os.getenv("MODEL_SERVER_EMBED_TIMEOUT", "600"))  # 문서 임베딩 (대량)
+    MODEL_SERVER_QUERY_TIMEOUT: float = float(os.getenv("MODEL_SERVER_QUERY_TIMEOUT", "30"))  # 쿼리 임베딩 (소량)
     MODEL_SERVER_KEYWORD_TIMEOUT: float = float(os.getenv("MODEL_SERVER_KEYWORD_TIMEOUT", "120"))
     MODEL_SERVER_GRAPH_TIMEOUT: float = float(os.getenv("MODEL_SERVER_GRAPH_TIMEOUT", "300"))
     MODEL_SERVER_HEALTH_TIMEOUT: float = float(os.getenv("MODEL_SERVER_HEALTH_TIMEOUT", "10"))

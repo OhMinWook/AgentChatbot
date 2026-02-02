@@ -1,28 +1,46 @@
 """통화 요약용 프롬프트 빌더 - STT 결과를 LLM 요약 요청으로 변환"""
 
-from typing import Dict, Any, Optional
+import tiktoken
+from typing import Dict, Any, Optional, List
 from app.core.config import settings
 
 
 class CallSummaryPromptBuilder:
+    # 청크 분할 설정 (tiktoken 기준, 한글은 과대추정되므로 여유있게 설정)
+    CHUNK_THRESHOLD = 10000  # 이 토큰 수 이상이면 분할
+    CHUNK_SIZE = 6500        # 청크 크기
+    CHUNK_OVERLAP = 500      # 오버랩 크기
+
     def __init__(self):
+        # tiktoken 인코더 초기화 (cl100k_base: GPT-4 기준)
+        self._encoder = tiktoken.get_encoding("cl100k_base")
         # 기본 시스템 프롬프트: 통화 요약 전문가
         self.default_system_prompt = (
             "너는 통화 내용을 분석하는 전문가야.\n"
-      "주어진 통화 녹취록을 **빠짐없이** 분석하여 정리해줘.\n\n"
+            "주어진 통화 녹취록을 **빠짐없이** 분석하여 정리해줘.\n\n"
 
-      "### [분석 방법]\n"
-      "1. 먼저 전체 통화를 처음부터 끝까지 읽어\n"
-      "2. 누가 누구에게 말하는지 화자를 구분해\n"
-      "3. 언급된 모든 주제/사안을 나열해\n"
-      "4. 날짜, 시간, 장소, 금액, 이름 등 구체적 정보를 추출해\n"
-      "5. 약속이나 합의 사항을 찾아\n\n"
+            "### [분석 방법]\n"
+            "1. 먼저 전체 통화를 처음부터 끝까지 읽어\n"
+            "2. 누가 누구에게 말하는지 화자를 구분해\n"
+            "3. 언급된 모든 주제/사안을 나열해\n"
+            "4. 날짜, 시간, 장소, 금액, 이름 등 구체적 정보를 추출해\n"
+            "5. 약속이나 합의 사항을 찾아\n\n"
 
-      "### [절대 원칙]\n"
-      "1. 없는 내용 창조 금지 - 통화에 없는 내용은 절대 추가하지 마\n"
-      "2. 누락 금지 - 언급된 내용은 사소해도 기록해\n"
-      "3. 구체적 정보 보존 - 날짜/시간/금액/이름은 정확히 기재\n"
-      "4. 정보 부족 시 '알 수 없음' 또는 '언급 없음'으로 표기\n"
+            "### [절대 원칙]\n"
+            "1. 없는 내용 창조 금지 - 통화에 없는 내용은 절대 추가하지 마\n"
+            "2. 누락 금지 - 언급된 내용은 사소해도 기록해\n"
+            "3. 구체적 정보 보존 - 날짜/시간/금액/이름은 정확히 기재\n"
+            "4. 정보 부족 시 '알 수 없음' 또는 '언급 없음'으로 표기\n"
+        )
+
+        # 청크별 요약용 시스템 프롬프트 (간결하게)
+        self.chunk_system_prompt = (
+            "너는 통화 내용을 분석하는 전문가야.\n"
+            "주어진 통화 녹취록 일부를 요약해줘.\n\n"
+            "### [절대 원칙]\n"
+            "1. 없는 내용 창조 금지\n"
+            "2. 핵심 내용, 구체적 정보(날짜/시간/금액/이름), 합의 사항 포함\n"
+            "3. 이전 요약이 제공되면 문맥을 이어서 요약\n"
         )
 
         # 기본 출력 포맷
@@ -99,6 +117,116 @@ class CallSummaryPromptBuilder:
         }
 
         return payload
+
+    def count_tokens(self, text: str) -> int:
+        """tiktoken으로 토큰 수 측정"""
+        return len(self._encoder.encode(text))
+
+    def needs_chunking(self, transcript: str) -> bool:
+        """청크 분할이 필요한지 확인"""
+        return self.count_tokens(transcript) >= self.CHUNK_THRESHOLD
+
+    def split_into_chunks(self, transcript: str) -> List[str]:
+        """
+        통화록을 오버랩이 있는 청크로 분할 (토큰 기준)
+
+        Returns: 청크 리스트
+        """
+        tokens = self._encoder.encode(transcript)
+        chunks = []
+        start = 0
+        total_tokens = len(tokens)
+
+        while start < total_tokens:
+            end = min(start + self.CHUNK_SIZE, total_tokens)
+
+            # 청크 토큰을 텍스트로 디코딩
+            chunk_tokens = tokens[start:end]
+            chunk_text = self._encoder.decode(chunk_tokens)
+
+            # 마지막 청크가 아니면 문장 경계에서 자르기 시도
+            if end < total_tokens:
+                # 청크 끝 부근에서 문장 끝(. ! ? 줄바꿈) 찾기
+                search_start = max(len(chunk_text) - 300, 0)
+                last_break = -1
+                for i in range(len(chunk_text) - 1, search_start, -1):
+                    if chunk_text[i] in '.!?\n':
+                        last_break = i + 1
+                        break
+                if last_break > 0:
+                    chunk_text = chunk_text[:last_break]
+                    # 실제 사용된 토큰 수 재계산
+                    end = start + len(self._encoder.encode(chunk_text))
+
+            chunks.append(chunk_text.strip())
+
+            # 다음 시작점 (오버랩 적용)
+            start = end - self.CHUNK_OVERLAP
+            if start >= total_tokens:
+                break
+
+        return chunks
+
+    def build_chunk_payload(
+        self,
+        chunk: str,
+        chunk_index: int,
+        total_chunks: int,
+        previous_summary: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        청크별 요약 요청 payload 생성
+
+        :param chunk: 현재 청크 텍스트
+        :param chunk_index: 청크 인덱스 (0부터 시작)
+        :param total_chunks: 전체 청크 수
+        :param previous_summary: 이전 청크의 요약 (문맥 연결용)
+        """
+        if previous_summary:
+            user_content = (
+                f"[이전 내용 요약]\n{previous_summary}\n\n"
+                f"---\n\n"
+                f"[통화 내용 ({chunk_index + 1}/{total_chunks} 부분)]\n{chunk}\n\n"
+                f"위 내용을 이전 요약과 문맥이 이어지도록 요약해줘."
+            )
+        else:
+            user_content = (
+                f"[통화 내용 ({chunk_index + 1}/{total_chunks} 부분)]\n{chunk}\n\n"
+                f"위 내용을 요약해줘."
+            )
+
+        messages = [
+            {"role": "system", "content": self.chunk_system_prompt},
+            {"role": "user", "content": user_content}
+        ]
+
+        return {
+            "model": settings.VLLM_MODEL,
+            "messages": messages,
+            "max_tokens": 1024,  # 청크 요약은 짧게
+            "temperature": settings.DEFAULT_TEMPERATURE,
+        }
+
+    def build_final_summary_payload(self, combined_summary: str) -> Dict[str, Any]:
+        """
+        청크별 요약을 통합한 최종 요약 요청 payload 생성
+        """
+        user_content = (
+            f"다음은 긴 통화를 여러 부분으로 나눠 요약한 내용이야.\n"
+            f"이를 하나의 완성된 요약으로 정리해줘:\n\n{combined_summary}"
+        )
+
+        messages = [
+            {"role": "system", "content": self.default_system_prompt + "\n" + self.default_output_format},
+            {"role": "user", "content": user_content}
+        ]
+
+        return {
+            "model": settings.VLLM_MODEL,
+            "messages": messages,
+            "max_tokens": settings.DEFAULT_MAX_TOKENS,
+            "temperature": settings.DEFAULT_TEMPERATURE,
+        }
 
 
 # 싱글톤 인스턴스

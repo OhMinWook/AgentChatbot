@@ -1,6 +1,13 @@
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# 로깅 설정 (ERROR 레벨)
+logging.basicConfig(
+    level=logging.ERROR,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 from app.api.routes_health import router as health_router
 from app.api.routes_chatbot import router as chatbot_router
@@ -9,9 +16,9 @@ from app.api.routes_dialogue_converter import router as dialogue_converter_route
 from app.api.routes_document_automation import router as document_automation_router
 
 # 클라이언트 인스턴스들 (종료 시 정리용)
-from app.services.clients.llm_client import llm_client
-from app.services.clients.model_server_client import model_server_client
-from app.services.clients.stt_client import stt_client
+from app.services.api_clients.llm_client import llm_client
+from app.services.api_clients.model_server_client import model_server_client
+from app.services.api_clients.stt_client import stt_client
 from app.services.utils.memory_service import memory_service
 
 

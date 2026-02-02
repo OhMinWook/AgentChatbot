@@ -8,8 +8,8 @@ from typing import Dict, Any, List, AsyncGenerator
 
 from langchain_core.messages import HumanMessage, AIMessage
 
-from app.services.rag_agent.graph_state import MainState, AgentSubState
-from app.services.rag_agent.prompts import (
+from app.services.chat_agent.graph_state import MainState, AgentSubState
+from app.services.chat_agent.prompts import (
     SUMMARIZE_PROMPT,
     ANALYZE_REWRITE_PROMPT,
     AGENT_PROMPT,
@@ -17,9 +17,9 @@ from app.services.rag_agent.prompts import (
     DEFAULT_CLARIFICATION_MESSAGE,
     CROSS_VALIDATION_PROMPT
 )
-from app.services.rag_agent.tools import create_search_tool
+from app.services.chat_agent.tools import create_search_tool
 from app.services.utils.memory_service import memory_service
-from app.services.clients.llm_client import llm_client
+from app.services.api_clients.llm_client import llm_client
 from app.core.config import settings
 
 # Neo4j 기반 LightRAG 서비스
@@ -227,7 +227,7 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
     for i, q in enumerate(questions):
         logger.debug(f"  질문 {i+1}: {q}")
 
-    # 1. ColBERT 배치 검색 (로컬 Voyager 인덱스)
+    # 1. ColBERT 배치 검색 (모델 서버 원격 인덱스)
     search_tool = create_search_tool(invoke_id)
     colbert_task = search_tool.search_batch(questions, filter_filename=filter_filename)
 
@@ -271,12 +271,13 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
 
         if prompt is None:
             no_result_msg = f"'{questions[0]}'에 대한 관련 문서를 찾지 못했습니다."
-            all_answers = [{"question": questions[0], "answer": no_result_msg, "sources": [], "prompt": None}]
+            all_answers = [{"question": questions[0], "answer": no_result_msg, "sources": [], "rag_docs": [], "prompt": None}]
         else:
             all_answers = [{
                 "question": questions[0],
                 "answer": "",  # 스트리밍에서 생성될 예정
                 "sources": col_res.get("references", []),
+                "rag_docs": col_res.get("results", []),  # 디버깅용 검색 결과
                 "prompt": prompt
             }]
 
@@ -286,6 +287,7 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
     # 복수 질문: 각각 LLM 호출 (통합 시 필요)
     async def generate_answer(idx: int, question: str, col_res: Dict, lightrag_ctx: str):
         references = col_res.get("references", [])
+        rag_docs = col_res.get("results", [])
         prompt = build_prompt(question, col_res, lightrag_ctx)
 
         if prompt is None:
@@ -293,11 +295,12 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
                 "idx": idx,
                 "question": question,
                 "answer": f"'{question}'에 대한 관련 문서를 찾지 못했습니다.",
-                "sources": []
+                "sources": [],
+                "rag_docs": []
             }
 
         answer = await _call_llm([{"role": "user", "content": prompt}], max_tokens=settings.DEFAULT_MAX_TOKENS)
-        return {"idx": idx, "question": question, "answer": answer, "sources": references}
+        return {"idx": idx, "question": question, "answer": answer, "sources": references, "rag_docs": rag_docs}
 
     tasks = [
         generate_answer(idx, questions[idx], colbert_results[idx], lightrag_results[idx])
@@ -313,7 +316,8 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
     all_answers = [{
         "question": r["question"],
         "answer": r["answer"],
-        "sources": r["sources"]
+        "sources": r["sources"],
+        "rag_docs": r.get("rag_docs", [])
     } for r in all_results]
 
     logger.info(f"[Process] {len(all_answers)}개 답변 완료")

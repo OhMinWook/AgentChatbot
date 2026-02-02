@@ -1,20 +1,21 @@
 """SSE (Server-Sent Events) 관련 공통 유틸리티"""
 import json
-from typing import Dict, Any
+from enum import Enum
+from typing import Dict
 from fastapi.responses import StreamingResponse
 
 
-def create_sse_message(event: str, data: dict) -> str:
-    """SSE 형식의 메시지 생성
-
-    Args:
-        event: SSE 이벤트 이름 (예: 'progress', 'result', 'error')
-        data: 전송할 데이터 딕셔너리
-
-    Returns:
-        SSE 형식 문자열 (event: ...\ndata: ...\n\n)
-    """
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+class SSEType(str, Enum):
+    """SSE 이벤트 타입"""
+    PROGRESS = "progress"
+    DONE = "done"
+    ERROR = "error"
+    ANSWER = "answer"
+    REFERENCES = "references"
+    CLARIFICATION = "clarification_needed"
+    RESULT = "result"
+    RAG_DOCUMENTS = "rag_documents"  # 디버깅용 RAG 검색 결과
+    MARKDOWN_PREVIEW = "markdown_preview"  # 디버깅용 마크다운 변환 결과
 
 
 def create_sse_data(data: dict) -> str:

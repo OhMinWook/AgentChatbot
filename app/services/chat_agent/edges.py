@@ -4,7 +4,7 @@ LangGraph 엣지 및 라우팅 로직
 
 from typing import Literal, List
 from langgraph.types import Send
-from app.services.rag_agent.graph_state import MainState
+from app.services.chat_agent.graph_state import MainState
 
 
 def route_after_analyze(state: MainState) -> Literal["human_input", "fan_out_agents"]:

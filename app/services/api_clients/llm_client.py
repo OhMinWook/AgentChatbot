@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 class LLMClient:
     def __init__(self):
-        self.base_url = settings.VLLM_BASE_URL
+        self.base_url = settings.MODEL_SERVER_URL
         self.headers = {
             "Content-Type": "application/json",
             # 만약 vLLM에 API 키를 걸었다면 여기에 추가: "Authorization": f"Bearer {KEY}"
@@ -24,7 +24,9 @@ class LLMClient:
     def client(self) -> httpx.AsyncClient:
         """일반 요청용 클라이언트 (lazy initialization)"""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=settings.LLM_TIMEOUT)
+            # 동시 연결 제한 늘리기 (기본값: 100)
+            limits = httpx.Limits(max_connections=500, max_keepalive_connections=100)
+            self._client = httpx.AsyncClient(timeout=settings.LLM_TIMEOUT, limits=limits)
         return self._client
 
     @property
@@ -47,7 +49,11 @@ class LLMClient:
     def extract_content(response: dict) -> str:
         """LLM 응답에서 content를 안전하게 추출"""
         try:
-            return response["choices"][0]["message"]["content"]
+            content = response["choices"][0]["message"]["content"]
+            if content is None:
+                logger.warning(f"LLM 응답 content가 None: {response}")
+                return ""
+            return content
         except (KeyError, IndexError, TypeError) as e:
             logger.error(f"LLM 응답 파싱 실패: {e}, response={response}")
             raise ValueError(f"LLM 응답 형식 오류: {e}")
@@ -59,13 +65,19 @@ class LLMClient:
         :param max_retries: 실패 시 재시도 횟수 (기본 1회)
         :return: 파싱된 JSON dict (Response 객체 아님)
         """
+        import time
         url = f"{self.base_url}/v1/chat/completions"
         last_error = None
+
+        logger.info(f"[LLM Client] 요청 시작 → {url}")
+        start_time = time.time()
 
         for attempt in range(max_retries + 1):
             try:
                 response = await self.client.post(url, json=payload, headers=self.headers)
                 response.raise_for_status()
+                duration = time.time() - start_time
+                logger.info(f"[LLM Client] 응답 완료 ({duration:.2f}s)")
                 return response.json()
 
             except httpx.HTTPStatusError as e:

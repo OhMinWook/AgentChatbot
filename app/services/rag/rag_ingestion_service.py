@@ -3,8 +3,8 @@ import tempfile
 import logging
 import os
 import re
-import hashlib
-from typing import List, Dict, Any, Optional
+import time
+from typing import List, Dict, Optional
 
 # Polaris 비활성화 시 사용할 대체 라이브러리들
 try:
@@ -26,37 +26,22 @@ except ImportError:
     pythoncom = None
 
 from app.core.config import settings
-from app.services.clients.model_server_client import model_server_client
-from app.services.clients.polaris_client import polaris_converter, PolarisJsonParser
-from app.services.rag.local_index_service import local_index_service
-from app.services.rag.lightrag_service import lightrag_service
+from app.services.api_clients.model_server_client import model_server_client
+from app.services.api_clients.polaris_client import polaris_converter, PolarisJsonParser
 
 logger = logging.getLogger(__name__)
-
-# 청크 설정 (512 토큰 ≈ 1500자 한국어 기준)
-CHUNK_SIZE = 1500
-CHUNK_OVERLAP = 200
 
 
 class RagIngestionService:
     def __init__(self):
         self._markitdown = MarkItDown() if MarkItDown else None
 
-    async def _create_chunks_with_keywords(
-        self,
-        markdown_content: str,
-        file_name: str
-    ) -> List[Dict]:
-        """
-        마크다운을 512토큰 청크로 분할하고 키워드를 추출합니다.
+    # ========================================
+    # 청킹 파이프라인
+    # ========================================
 
-        Returns:
-            [{"id": "...", "content": "[문서:...][키워드:...]\n본문", "metadata": {...}}, ...]
-        """
-        if not markdown_content.strip():
-            return []
-
-        # 1. 페이지별 텍스트 파싱
+    def _parse_page_texts(self, markdown_content: str) -> List[tuple]:
+        """마크다운에서 페이지별 텍스트 추출"""
         page_pattern = re.compile(r'\n--- Page (\d+) ---\n')
         parts = page_pattern.split(markdown_content)
 
@@ -73,81 +58,85 @@ class RagIngestionService:
             except (IndexError, ValueError):
                 continue
 
+        return page_texts
+
+    def _create_chunks(self, markdown_content: str, file_name: str) -> List[Dict]:
+        """
+        마크다운을 청크로 분할합니다.
+
+        Returns:
+            [{
+                "id": "manual.pdf_p1_0",
+                "content": "청크 내용",
+                "metadata": {"source": "manual.pdf", "page": 1}
+            }, ...]
+        """
+        if not markdown_content.strip():
+            return []
+
+        page_texts = self._parse_page_texts(markdown_content)
         if not page_texts:
             return []
 
-        # 2. 청크 분할 (페이지 정보 유지)
-        raw_chunks = []  # [{"text": "...", "page": N}, ...]
+        chunk_size = settings.CHUNK_SIZE
+        chunk_overlap = settings.CHUNK_OVERLAP
+
+        # 전체 텍스트를 페이지 정보와 함께 하나로 합침
+        full_text = ""
+        page_ranges = []  # [(text_start, text_end, page_num), ...]
 
         for page_num, page_text in page_texts:
-            start = 0
-            text_len = len(page_text)
+            start_idx = len(full_text)
+            full_text += page_text + "\n\n"
+            end_idx = len(full_text)
+            page_ranges.append((start_idx, end_idx, page_num))
 
-            while start < text_len:
-                end = start + CHUNK_SIZE
-                chunk_text = page_text[start:end]
+        # 청크 분할
+        chunks = []
+        start = 0
+        text_len = len(full_text)
+        chunk_idx = 0
 
-                # 단어 중간에서 자르지 않기
-                if end < text_len:
-                    last_space = chunk_text.rfind(' ')
-                    last_newline = chunk_text.rfind('\n')
-                    cut_point = max(last_space, last_newline)
-                    if cut_point > CHUNK_SIZE * 0.5:
-                        chunk_text = chunk_text[:cut_point]
-                        end = start + cut_point
+        while start < text_len:
+            end = min(start + chunk_size, text_len)
+            chunk_text = full_text[start:end]
 
-                if chunk_text.strip():
-                    raw_chunks.append({
-                        "text": chunk_text.strip(),
-                        "page": page_num
-                    })
+            # 문장 경계에서 자르기
+            if end < text_len:
+                last_period = chunk_text.rfind('.')
+                last_newline = chunk_text.rfind('\n')
+                cut_point = max(last_period, last_newline)
+                if cut_point > chunk_size * 0.7:
+                    chunk_text = chunk_text[:cut_point + 1]
+                    end = start + cut_point + 1
 
-                start = end - CHUNK_OVERLAP if end < text_len else text_len
+            if chunk_text.strip():
+                # 청크가 포함하는 페이지 계산
+                chunk_start = start
+                chunk_end = start + len(chunk_text)
+                page = 1
 
-        if not raw_chunks:
-            return []
+                for (ps, pe, pn) in page_ranges:
+                    if ps < chunk_end and pe > chunk_start:
+                        page = pn
+                        break
 
-        logger.info(f"[Chunking] {file_name}: {len(raw_chunks)}개 청크 생성")
+                chunk_id = f"{file_name}_p{page}_{chunk_idx}"
 
-        # 3. 키워드 추출 (배치)
-        chunk_texts = [c["text"] for c in raw_chunks]
+                chunks.append({
+                    "id": chunk_id,
+                    "content": chunk_text.strip(),
+                    "metadata": {
+                        "source": file_name,
+                        "page": page
+                    }
+                })
+                chunk_idx += 1
 
-        try:
-            keywords_list = await model_server_client.extract_keywords_batch(chunk_texts)
-            logger.info(f"[Keywords] {len(keywords_list)}개 키워드 추출 완료")
-        except Exception as e:
-            logger.warning(f"[Keywords] 키워드 추출 실패, 빈 키워드 사용: {e}")
-            keywords_list = [""] * len(raw_chunks)
+            start = end - chunk_overlap if end < text_len else text_len
 
-        # 4. 최종 청크 포맷팅
-        final_chunks = []
-        for i, chunk in enumerate(raw_chunks):
-            keywords = keywords_list[i] if i < len(keywords_list) else ""
-            page = chunk["page"]
-            text = chunk["text"]
-
-            # 포맷: [문서: 파일명 | 페이지: N][키워드: ...]\n본문
-            if keywords:
-                content = f"[문서: {file_name} | 페이지: {page}]\n[키워드: {keywords}]\n\n{text}"
-            else:
-                content = f"[문서: {file_name} | 페이지: {page}]\n\n{text}"
-
-            # 콘텐츠 기반 ID 생성 (중복 방지)
-            # 파일명 + 페이지 + 텍스트 해시 조합
-            content_hash = hashlib.md5(text.encode('utf-8')).hexdigest()[:12]
-            chunk_id = f"{file_name}_{page}_{content_hash}"
-
-            final_chunks.append({
-                "id": chunk_id,
-                "content": content,
-                "metadata": {
-                    "source": file_name,
-                    "page": page,
-                    "keywords": keywords
-                }
-            })
-
-        return final_chunks
+        logger.info(f"[Chunking] {file_name}: {len(chunks)}개 청크 생성")
+        return chunks
 
     def _process_pdf_with_pdf4llm(self, pdf_path: str, display_name: str, invoke_id: str) -> str:
         """pdf4llm을 사용하여 PDF를 마크다운으로 변환합니다. (페이지 구분자 포함)"""
@@ -233,11 +222,15 @@ class RagIngestionService:
             if com_initialized:
                 pythoncom.CoUninitialize()
 
-    async def _store_chunks_to_colbert(self, chunks: List[Dict], invoke_id: str):
+    async def _store_chunks_to_colbert(
+        self,
+        chunks: List[Dict],
+        invoke_id: str,
+        file_name: str,
+        total_pages: int
+    ):
         """
-        청크 목록을 로컬 ColBERT 인덱스에 저장합니다.
-        - 모델 서버: 인코딩만 담당 (Stateless)
-        - 게이트웨이: Voyager + Redis에 저장
+        청크 목록을 모델 서버의 ColBERT 인덱스에 저장합니다.
         """
         if not chunks:
             return
@@ -245,49 +238,43 @@ class RagIngestionService:
         total_chunks = len(chunks)
         logger.info(f"[Ingestion] ColBERT에 저장할 총 청크 수: {total_chunks}")
 
-        # local_index_service가 내부적으로 배치 처리
-        indexed_count = await local_index_service.index_documents(invoke_id, chunks)
+        # 모델 서버에 인덱싱 요청
+        result = await model_server_client.colbert_index_documents(invoke_id, chunks)
+        indexed_count = result.get("indexed_count", 0)
         logger.info(f"[Ingestion] ColBERT 인덱싱 완료: {indexed_count} / {total_chunks} 청크")
 
-    async def _store_chunks_to_lightrag(self, chunks: List[Dict], invoke_id: str):
-        """
-        청크 목록을 LightRAG 지식 그래프에 저장합니다.
-        (백그라운드에서 실행됨)
-        """
-        if not chunks:
-            return
+        # 문서 메타데이터 저장
+        await model_server_client.colbert_store_document_metadata(
+            invoke_id=invoke_id,
+            file_name=file_name,
+            total_pages=total_pages,
+            total_chunks=total_chunks
+        )
+        logger.info(f"[Ingestion] 문서 메타데이터 저장 완료: {file_name} ({total_pages}페이지, {total_chunks}청크)")
 
-        try:
-            logger.info(f"🌿 [Ingestion] LightRAG 인덱싱 시작 (백그라운드)...")
-            await lightrag_service.index_chunks(chunks, invoke_id)
-        except Exception as e:
-            logger.error(f"🌿 [Ingestion] LightRAG 인덱싱 실패: {e}")
-
-    async def ingest_file(self, file_name: str, invoke_id: str, file_path: str, on_progress=None):
+    async def ingest_file(self, file_name: str, invoke_id: str, file_path: str, on_progress=None, on_markdown=None):
         """
-        파일을 처리하고, 결과를 ColBERT 및 LightRAG 인덱스에 저장합니다.
-        
+        파일을 처리하고, 결과를 ColBERT 인덱스에 저장합니다.
+
         Args:
             file_name: 파일명 (확장자 포함, 예: 'report.pdf')
             invoke_id: 세션 ID
             file_path: 파일 경로
             on_progress: 진행률 콜백 (async def func(percent, message))
+            on_markdown: 마크다운 변환 결과 콜백 (async def func(markdown_content))
         """
         logger.info(f"[Ingestion] 파일 처리 시작: {file_name} (Room: {invoke_id})")
 
         if on_progress:
             await on_progress(0, "파일 처리 시작")
 
-        # 파일명 자체가 display_name (확장자 포함됨)
         display_name = file_name
-        
-        # 확장자 추출
         _, ext = os.path.splitext(display_name)
         ext_to_use = ext.lower().strip()
 
         markdown_content = ""
 
-        # === 1. 문서 파싱 (0% -> 10%) ===
+        # === 1. 문서 파싱 (0% -> 20%) ===
         if on_progress:
             await on_progress(5, "문서 내용 추출 중...")
 
@@ -295,13 +282,15 @@ class RagIngestionService:
             logger.info("[Ingestion] Polaris 엔진 사용")
             with tempfile.TemporaryDirectory() as temp_output_dir:
                 try:
+                    polaris_start = time.time()
                     polaris_data = await asyncio.to_thread(
                         polaris_converter.convert, file_path, temp_output_dir, True
                     )
+                    polaris_elapsed = time.time() - polaris_start
                     if polaris_data:
                         parser = PolarisJsonParser(polaris_data)
                         markdown_content = parser.parse_to_markdown()
-                        logger.info(f"[Polaris] {display_name}: {len(markdown_content)}자")
+                        logger.info(f"[Polaris] {display_name}: {len(markdown_content)}자 ({polaris_elapsed:.2f}s)")
                     else:
                         logger.error("[Ingestion] Polaris 변환 실패")
                         return
@@ -347,81 +336,63 @@ class RagIngestionService:
                 except Exception as e:
                     logger.error(f"[Ingestion] MarkItDown 오류: {e}")
                     return
-        
-        if on_progress:
-            await on_progress(10, "문서 파싱 완료")
 
-        # 최종 체크
+        if on_progress:
+            await on_progress(20, "문서 파싱 완료")
+
         if not markdown_content:
             logger.error("[Ingestion] 마크다운 없음")
             return
 
-        # === 2. 청킹 및 키워드 추출 (10% -> 20%) ===
-        if on_progress:
-            await on_progress(15, "텍스트 청킹 및 키워드 추출 중...")
+        # 마크다운 결과 콜백 (디버깅용)
+        if on_markdown:
+            await on_markdown(markdown_content)
 
-        # 키워드 enrichment 청킹
-        chunks = await self._create_chunks_with_keywords(markdown_content, display_name)
+        # === 2. 청킹 (20% -> 40%) ===
+        if on_progress:
+            await on_progress(25, "청크 생성 중...")
+
+        chunks = self._create_chunks(markdown_content, display_name)
 
         if not chunks:
             logger.error("[Ingestion] 청크 생성 실패")
             return
-            
+
         if on_progress:
-            await on_progress(20, f"청크 생성 완료 ({len(chunks)}개). 인덱싱 시작...")
+            await on_progress(40, f"{len(chunks)}개 청크 생성 완료")
 
-        # === 3. 병렬 인덱싱 (ColBERT Only - LightRAG 잠시 비활성화) ===
-        
-        async def run_colbert():
-            try:
+        # 총 페이지 수 계산
+        total_pages = max((c["metadata"].get("page", 1) for c in chunks), default=1)
+
+        # === 3. ColBERT 인덱싱 (40% -> 95%) ===
+        if on_progress:
+            await on_progress(50, "ColBERT 인덱싱 중...")
+
+        try:
+            indexing_task = asyncio.create_task(
+                self._store_chunks_to_colbert(chunks, invoke_id, display_name, total_pages)
+            )
+            current_percent = 55
+            while not indexing_task.done() and current_percent <= 90:
+                await asyncio.sleep(3)
+                if indexing_task.done():
+                    break
                 if on_progress:
-                    await on_progress(30, "ColBERT 인덱싱 저장 중...")
+                    await on_progress(current_percent, "ColBERT 인덱싱 중...")
+                current_percent += 10
 
-                # 실제 인덱싱을 별도 태스크로 실행하면서 4초마다 5%씩 진행률 표시
-                indexing_task = asyncio.create_task(
-                    self._store_chunks_to_colbert(chunks, invoke_id)
-                )
-                current_percent = 35
-                while not indexing_task.done() and current_percent <= 85:
-                    await asyncio.sleep(4)
-                    if indexing_task.done():
-                        break
-                    if on_progress:
-                        await on_progress(current_percent, "ColBERT 인덱싱 저장 중...")
-                    current_percent += 5
-
-                await indexing_task  # 예외 전파
-                logger.info(f"✅ [Ingestion] ColBERT 인덱싱 완료")
-                if on_progress:
-                    await on_progress(90, "ColBERT 인덱싱 완료")
-            except Exception as e:
-                logger.error(f"❌ [Ingestion] ColBERT 인덱싱 실패: {e}")
-
-        # LightRAG는 현재 비활성화 (필요 시 주석 해제)
-        """
-        async def run_lightrag():
-            # LightRAG 내부 진행률(0~100)을 전체 공정(20~99)으로 매핑
-            async def lightrag_progress_adapter(p, msg):
-                if on_progress:
-                    # 20 + (p * 0.79) -> 약 20%에서 99%까지
-                    mapped_percent = 20 + int(p * 0.79)
-                    await on_progress(mapped_percent, msg)
-
-            try:
-                logger.info(f"🌿 [Ingestion] LightRAG 인덱싱 시작...")
-                await lightrag_service.index_chunks(chunks, invoke_id, on_progress=lightrag_progress_adapter)
-                logger.info(f"✅ [Ingestion] LightRAG 인덱싱 완료")
-            except Exception as e:
-                logger.error(f"❌ [Ingestion] LightRAG 인덱싱 실패: {e}")
-        """
-
-        # ColBERT만 실행
-        await run_colbert()
+            await indexing_task
+            logger.info(f"[Ingestion] ColBERT 인덱싱 완료 ({len(chunks)}개 청크)")
+            if on_progress:
+                await on_progress(95, "ColBERT 인덱싱 완료")
+        except Exception as e:
+            logger.error(f"[Ingestion] ColBERT 인덱싱 실패: {e}")
+            raise
 
         # === 4. 완료 (100%) ===
         if on_progress:
-            await on_progress(100, "모든 인덱싱 작업 완료!")
-            
+            await on_progress(100, "인덱싱 완료!")
+
         logger.info(f"[Ingestion] {file_name} 완료 ({len(chunks)}개 청크)")
 
 

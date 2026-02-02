@@ -46,10 +46,61 @@
         .mode-switch { display: flex; gap: 10px; margin-bottom: 10px; }
         .mode-switch label { cursor: pointer; display: flex; align-items: center; background: #eee; padding: 8px 15px; border-radius: 20px; font-weight: normal; }
         .mode-switch input:checked + span { font-weight: bold; color: #007bff; }
+
+        /* RAG Debug Panel */
+        #ragPanel { display: none; position: fixed; top: 50px; right: 20px; width: 500px; max-height: 80vh; background: #1e1e1e; border: 2px solid #007bff; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); z-index: 1000; }
+        #ragPanel.visible { display: block; }
+        #ragPanelHeader { background: #007bff; color: white; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; cursor: move; }
+        #ragPanelHeader h3 { margin: 0; font-size: 14px; }
+        #ragPanelClose { background: none; border: none; color: white; font-size: 18px; cursor: pointer; width: auto; padding: 0 5px; margin: 0; }
+        #ragPanelContent { padding: 10px; max-height: calc(80vh - 50px); overflow-y: auto; }
+        .rag-doc { background: #2d2d2d; border: 1px solid #444; border-radius: 4px; margin-bottom: 10px; padding: 10px; font-family: 'Consolas', monospace; font-size: 12px; color: #d4d4d4; }
+        .rag-doc-header { display: flex; justify-content: space-between; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #444; }
+        .rag-doc-score { color: #4ec9b0; font-weight: bold; }
+        .rag-doc-source { color: #569cd6; }
+        .rag-doc-content { white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto; line-height: 1.4; }
+        #ragToggleBtn { position: fixed; top: 10px; right: 20px; z-index: 999; background: #007bff; padding: 8px 15px; font-size: 12px; }
+
+        /* Markdown Preview Panel */
+        #mdPanel { display: none; position: fixed; top: 50px; left: 20px; width: 600px; max-height: 80vh; background: #1e1e1e; border: 2px solid #28a745; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); z-index: 1000; }
+        #mdPanel.visible { display: block; }
+        #mdPanelHeader { background: #28a745; color: white; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; }
+        #mdPanelHeader h3 { margin: 0; font-size: 14px; }
+        #mdPanelClose { background: none; border: none; color: white; font-size: 18px; cursor: pointer; width: auto; padding: 0 5px; margin: 0; }
+        #mdPanelContent { padding: 15px; max-height: calc(80vh - 50px); overflow-y: auto; font-family: 'Consolas', monospace; font-size: 12px; color: #d4d4d4; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+        #mdToggleBtn { position: fixed; top: 10px; left: 20px; z-index: 999; background: #28a745; padding: 8px 15px; font-size: 12px; }
+        .md-stats { background: #2d2d2d; padding: 8px 12px; border-radius: 4px; margin-bottom: 10px; font-size: 11px; color: #888; }
+        .md-stats span { color: #4ec9b0; font-weight: bold; }
     </style>
 </head>
 <body>
     <h1>🤖 Agentic RAG Test Console</h1>
+
+    <!-- Debug Toggle Buttons -->
+    <button id="mdToggleBtn" onclick="toggleMdPanel()">📝 마크다운 (0자)</button>
+    <button id="ragToggleBtn" onclick="toggleRagPanel()">📄 RAG 문서 (0)</button>
+
+    <!-- Markdown Preview Panel -->
+    <div id="mdPanel">
+        <div id="mdPanelHeader">
+            <h3>📝 마크다운 변환 결과 (디버깅)</h3>
+            <button id="mdPanelClose" onclick="toggleMdPanel()">×</button>
+        </div>
+        <div id="mdPanelContent">
+            <p style="color: #888; text-align: center;">파일을 업로드하면 마크다운 변환 결과가 여기에 표시됩니다.</p>
+        </div>
+    </div>
+
+    <!-- RAG Debug Panel -->
+    <div id="ragPanel">
+        <div id="ragPanelHeader">
+            <h3>📄 RAG 검색 결과 (디버깅)</h3>
+            <button id="ragPanelClose" onclick="toggleRagPanel()">×</button>
+        </div>
+        <div id="ragPanelContent">
+            <p style="color: #888; text-align: center;">검색 결과가 여기에 표시됩니다.</p>
+        </div>
+    </div>
 
     <div class="container">
         <!-- Left Panel: Settings & Upload -->
@@ -78,6 +129,7 @@
                     <li style="color:#999; text-align:center;">파일 목록을 불러오세요.</li>
                 </ul>
                 <input type="hidden" id="selectedFile">
+                <button onclick="summarizeDocument()" style="margin-top: 10px; background: #28a745;">📋 선택 파일 요약</button>
             </div>
         </div>
 
@@ -112,6 +164,83 @@
         const logDiv = document.getElementById('log');
         let currentThreadId = null;
         let streamingAnswerEl = null;
+        let ragDocuments = [];  // RAG 문서 저장
+        let markdownContent = '';  // 마크다운 저장
+
+        function toggleRagPanel() {
+            const panel = document.getElementById('ragPanel');
+            panel.classList.toggle('visible');
+        }
+
+        function toggleMdPanel() {
+            const panel = document.getElementById('mdPanel');
+            panel.classList.toggle('visible');
+        }
+
+        function updateMdPanel(content, length, truncated = false) {
+            markdownContent = content;
+            const btn = document.getElementById('mdToggleBtn');
+            const panelContent = document.getElementById('mdPanelContent');
+
+            // 글자 수 포맷팅 (1000자 이상이면 K 단위)
+            const lenStr = length >= 1000 ? `${(length / 1000).toFixed(1)}K` : length;
+            btn.textContent = `📝 마크다운 (${lenStr}자)`;
+
+            // 페이지 수 계산
+            const pageMatches = content.match(/--- Page \d+ ---/g) || [];
+            const pageCount = pageMatches.length;
+
+            const truncateWarning = truncated ? '<span style="color: #f0ad4e;"> (일부만 표시)</span>' : '';
+            let html = `<div class="md-stats">총 <span>${length.toLocaleString()}</span>자 | <span>${pageCount}</span>페이지${truncateWarning}</div>`;
+            html += `<div>${escapeHtml(content)}</div>`;
+
+            panelContent.innerHTML = html;
+
+            // 자동으로 패널 열기
+            document.getElementById('mdPanel').classList.add('visible');
+        }
+
+        function updateRagPanel(documents) {
+            ragDocuments = documents;
+            const btn = document.getElementById('ragToggleBtn');
+            const content = document.getElementById('ragPanelContent');
+
+            btn.textContent = `📄 RAG 문서 (${documents.length})`;
+
+            if (documents.length === 0) {
+                content.innerHTML = '<p style="color: #888; text-align: center;">검색 결과가 없습니다.</p>';
+                return;
+            }
+
+            let html = '';
+            documents.forEach((doc, idx) => {
+                const score = doc.score !== undefined ? doc.score.toFixed(2) : 'N/A';
+                const source = doc.metadata?.source || 'unknown';
+                const page = doc.metadata?.page || '?';
+                const content_text = doc.content || '(내용 없음)';
+
+                html += `
+                    <div class="rag-doc">
+                        <div class="rag-doc-header">
+                            <span class="rag-doc-source">#${idx + 1} | ${source} (p.${page})</span>
+                            <span class="rag-doc-score">Score: ${score}</span>
+                        </div>
+                        <div class="rag-doc-content">${escapeHtml(content_text)}</div>
+                    </div>
+                `;
+            });
+
+            content.innerHTML = html;
+
+            // 자동으로 패널 열기
+            document.getElementById('ragPanel').classList.add('visible');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
 
         function log(msg, type = '') {
             const div = document.createElement('div');
@@ -204,11 +333,24 @@
                     body: formData
                 });
 
+                log(`응답 상태: ${response.status} ${response.statusText}`, response.ok ? 'progress' : 'error');
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    log(`서버 에러: ${errorText}`, 'error');
+                    return;
+                }
+
                 await handleSSE(response, (data) => {
                     if (data.type === 'progress') {
                         progressBar.style.width = `${data.percent}%`;
                         progressBar.textContent = `${data.percent}%`;
                         statusText.textContent = data.message;
+                    } else if (data.type === 'markdown_preview') {
+                        // 마크다운 변환 결과 표시
+                        updateMdPanel(data.content, data.length, data.truncated || false);
+                        const truncMsg = data.truncated ? ' (일부만 표시)' : '';
+                        log(`[DEBUG] 마크다운 변환 완료: ${data.length}자${truncMsg}`, 'progress');
                     } else if (data.type === 'done') {
                         progressBar.style.width = '100%';
                         progressBar.textContent = '완료';
@@ -221,6 +363,30 @@
                 });
             } catch (e) {
                 log(`업로드 네트워크 오류: ${e.message}`, 'error');
+            }
+        }
+
+        async function summarizeDocument() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            const invokeId = document.getElementById('invokeId').value;
+            const targetFile = document.getElementById('selectedFile').value;
+
+            if (!targetFile) return alert('요약할 파일을 선택해주세요.');
+
+            const formData = new FormData();
+            formData.append('target_filename', targetFile);
+
+            log(`[요약] ${targetFile} 요약 시작...`, 'progress');
+
+            try {
+                const response = await fetch(`${serverUrl}/message/document-summary/${invokeId}`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                await handleChatSSE(response);
+            } catch (e) {
+                log(`요약 요청 실패: ${e.message}`, 'error');
             }
         }
 
@@ -289,7 +455,12 @@
         async function handleChatSSE(response) {
             streamingAnswerEl = null;  // 스트리밍 시작 시 초기화
             await handleSSE(response, (data) => {
-                if (data.type === 'answer') {
+                if (data.type === 'progress') {
+                    // 문서 요약 진행률 표시
+                    const msg = data.message || data.step || '';
+                    const percent = data.percent !== undefined ? `[${data.percent}%] ` : '';
+                    log(`${percent}${msg}`, 'progress');
+                } else if (data.type === 'answer') {
                     // 첫 answer 청크이면 DOM 요소 생성, 이후는 append
                     if (!streamingAnswerEl) {
                         streamingAnswerEl = document.createElement('div');
@@ -301,6 +472,10 @@
                 } else if (data.type === 'references') {
                     const refs = data.docs.map(d => `📄 ${d.source} (p.${d.page})`).join(', ');
                     log(`참고 문서: ${refs}`, 'references');
+                } else if (data.type === 'rag_documents') {
+                    // RAG 문서 디버깅 패널 업데이트
+                    updateRagPanel(data.documents || []);
+                    log(`[DEBUG] RAG 문서 ${data.documents?.length || 0}개 수신`, 'progress');
                 } else if (data.type === 'clarification_needed') {
                     currentThreadId = data.thread_id;
                     const html = `
@@ -324,13 +499,23 @@
         async function handleSSE(response, callback) {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
+            let buffer = '';  // 불완전한 라인을 저장할 버퍼
+
+            console.log('[SSE] Starting to read stream...');
 
             while (true) {
                 const { done, value } = await reader.read();
-                if (done) break;
+                if (done) {
+                    console.log('[SSE] Stream ended');
+                    break;
+                }
 
-                const chunk = decoder.decode(value);
-                const lines = chunk.split('\n');
+                // 이전 버퍼와 새 청크를 합침
+                buffer += decoder.decode(value, { stream: true });
+
+                // 완전한 라인들만 처리 (마지막 불완전한 라인은 버퍼에 유지)
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';  // 마지막 (불완전할 수 있는) 라인을 버퍼에 유지
 
                 for (const line of lines) {
                     if (line.startsWith('data: ')) {
@@ -338,6 +523,7 @@
                             const jsonStr = line.slice(6);
                             if (!jsonStr.trim()) continue;
                             const data = JSON.parse(jsonStr);
+                            console.log('[SSE] Parsed data:', data.type);
                             callback(data);
                         } catch (e) {
                             console.error('SSE Parsing Error:', e);

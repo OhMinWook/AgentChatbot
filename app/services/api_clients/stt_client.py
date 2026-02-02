@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class STTClient:
     def __init__(self):
-        self.base_url = settings.STT_BASE_URL
+        self.base_url = settings.MODEL_SERVER_URL
         self.timeout = settings.STT_TIMEOUT  # STT는 오래 걸릴 수 있으므로 5분
 
         # 클라이언트는 lazy initialization (첫 사용 시 생성)
@@ -29,23 +29,24 @@ class STTClient:
 
     async def transcribe(self, file_path: str) -> str:
         """
-        오디오 파일을 STT 서버로 전송하여 텍스트로 변환
+        오디오 파일을 STT 서버로 전송하여 텍스트로 변환 (OpenAI 호환 API)
 
         :param file_path: 로컬에 저장된 오디오 파일 경로
         :return: 변환된 텍스트
         """
-        url = f"{self.base_url}/transcribe"
+        url = f"{self.base_url}/v1/audio/transcriptions"
 
         try:
-            # 파일을 multipart/form-data로 전송
+            # 파일을 multipart/form-data로 전송 (OpenAI 호환 형식)
             with open(file_path, "rb") as audio_file:
                 files = {"file": audio_file}
-                response = await self.client.post(url, files=files)
+                data = {"model": "whisper-large-v3-turbo"}
+                response = await self.client.post(url, files=files, data=data)
                 response.raise_for_status()
 
             result = response.json()
-            # STT 서버 응답: {"transcription": "...", "detected_language": "...", ...}
-            return result.get("transcription") or result.get("text") or result.get("transcript", "")
+            # OpenAI 호환 응답: {"text": "...", "language": "...", ...}
+            return result.get("text", "")
 
         except httpx.HTTPStatusError as e:
             logger.error(f"STT Server Error: {e.response.text}")
@@ -56,21 +57,22 @@ class STTClient:
 
     async def transcribe_bytes(self, audio_bytes: bytes, filename: str = "audio.wav") -> str:
         """
-        오디오 바이트 데이터를 직접 STT 서버로 전송
+        오디오 바이트 데이터를 직접 STT 서버로 전송 (OpenAI 호환 API)
 
         :param audio_bytes: 오디오 파일의 바이트 데이터
         :param filename: 파일명 (확장자 포함)
         :return: 변환된 텍스트
         """
-        url = f"{self.base_url}/transcribe"
+        url = f"{self.base_url}/v1/audio/transcriptions"
 
         try:
             files = {"file": (filename, audio_bytes)}
-            response = await self.client.post(url, files=files)
+            data = {"model": "whisper-large-v3-turbo"}
+            response = await self.client.post(url, files=files, data=data)
             response.raise_for_status()
 
             result = response.json()
-            return result.get("transcription") or result.get("text") or result.get("transcript", "")
+            return result.get("text", "")
 
         except httpx.HTTPStatusError as e:
             logger.error(f"STT Server Error: {e.response.text}")

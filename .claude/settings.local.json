@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(find:*)",
+      "Bash(git log:*)",
+      "WebSearch",
+      "Bash(git fetch:*)",
+      "Bash(dir:*)",
+      "Bash(findstr:*)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\user\\\\PycharmProjects\\\\PythonProject\" -Recurse -Filter \"*.py\")",
+      "Bash(Select-String -Pattern \"open.?chat\" -SimpleMatch)",
+      "Bash(Select-Object -First 10)",
+      "Bash(ls -la \"C:\\\\Users\\\\user\\\\PycharmProjects\\\\Model_Server\\\\routers\"\" && ls -la \"C:UsersuserPycharmProjectsModel_Serverservices\"\")",
+      "Bash(git checkout:*)",
+      "Bash(git reset:*)"
+    ]
+  }
+}

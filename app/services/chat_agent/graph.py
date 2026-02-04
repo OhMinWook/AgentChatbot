@@ -8,7 +8,6 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from app.services.chat_agent.graph_state import MainState
 from app.services.chat_agent.nodes import (
-    summarize_node,
     analyze_rewrite_node,
     human_input_node,
     process_question_node,
@@ -16,7 +15,7 @@ from app.services.chat_agent.nodes import (
 )
 from app.services.chat_agent.edges import (
     route_after_analyze,
-    route_after_human_input
+    route_after_human_input,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,15 +27,13 @@ def create_rag_graph(checkpointer=None):
     builder = StateGraph(MainState)
 
     # 노드 추가
-    builder.add_node("summarize", summarize_node)
     builder.add_node("analyze_rewrite", analyze_rewrite_node)
     builder.add_node("human_input", human_input_node)
     builder.add_node("process_question", process_question_node)
     builder.add_node("aggregate", aggregate_node)
 
     # 엣지 연결
-    builder.add_edge(START, "summarize")
-    builder.add_edge("summarize", "analyze_rewrite")
+    builder.add_edge(START, "analyze_rewrite")
 
     builder.add_conditional_edges(
         "analyze_rewrite",
@@ -56,6 +53,7 @@ def create_rag_graph(checkpointer=None):
         }
     )
 
+    # process_question → aggregate → END
     builder.add_edge("process_question", "aggregate")
     builder.add_edge("aggregate", END)
 
@@ -69,7 +67,3 @@ def create_rag_graph(checkpointer=None):
 
     logger.info("RAG Graph compiled successfully")
     return graph
-
-
-_default_checkpointer = MemorySaver()
-rag_graph = create_rag_graph(_default_checkpointer)

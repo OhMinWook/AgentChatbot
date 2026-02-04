@@ -107,7 +107,7 @@
         <div class="left-panel">
             <div class="section">
                 <label>Server URL</label>
-                <input type="text" id="serverUrl" value="http://localhost:8000">
+                <input type="text" id="serverUrl" value="http://localhost:8001">
                 <label>Invoke ID (Room)</label>
                 <input type="text" id="invokeId" value="test-room-001">
                 <button class="secondary" onclick="loadFileList()">📂 파일 목록 새로고침</button>
@@ -121,6 +121,16 @@
                 </div>
                 <div id="uploadStatus" style="font-size: 12px; color: #666; margin-top: 5px;"></div>
                 <button onclick="uploadFile()">⬆️ 업로드 시작</button>
+            </div>
+
+            <div class="section" style="background: #fff3cd; border: 1px solid #ffc107;">
+                <label>🧪 동시 업로드 테스트 (멀티프로세싱)</label>
+                <input type="file" id="multiFileInput" multiple>
+                <div id="multiUploadStatus" style="font-size: 12px; margin-top: 10px; max-height: 150px; overflow-y: auto;"></div>
+                <button onclick="uploadMultipleFiles()" style="background: #ffc107; color: #333;">🚀 동시 업로드 시작</button>
+                <div style="font-size: 11px; color: #856404; margin-top: 5px;">
+                    여러 파일 선택 후 동시에 업로드하여 병렬 처리 테스트
+                </div>
             </div>
 
             <div class="section">
@@ -214,9 +224,10 @@
 
             let html = '';
             documents.forEach((doc, idx) => {
-                const score = doc.score !== undefined ? doc.score.toFixed(2) : 'N/A';
+                const score = doc.score !== undefined ? doc.score.toFixed(4) : 'N/A';
                 const source = doc.metadata?.source || 'unknown';
                 const page = doc.metadata?.page || '?';
+                const docId = doc.doc_id || '-';
                 const content_text = doc.content || '(내용 없음)';
 
                 html += `
@@ -225,6 +236,7 @@
                             <span class="rag-doc-source">#${idx + 1} | ${source} (p.${page})</span>
                             <span class="rag-doc-score">Score: ${score}</span>
                         </div>
+                        <div style="font-size: 10px; color: #666; margin-bottom: 5px;">ID: ${docId}</div>
                         <div class="rag-doc-content">${escapeHtml(content_text)}</div>
                     </div>
                 `;
@@ -494,6 +506,103 @@
                     log('--- 답변 완료 ---', 'done');
                 }
             });
+        }
+
+        async function uploadMultipleFiles() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            const invokeId = document.getElementById('invokeId').value;
+            const fileInput = document.getElementById('multiFileInput');
+            const files = fileInput.files;
+            const statusDiv = document.getElementById('multiUploadStatus');
+
+            if (files.length === 0) return alert('파일을 선택해주세요.');
+
+            statusDiv.innerHTML = '';
+            const startTime = Date.now();
+
+            log(`[동시 업로드] ${files.length}개 파일 시작`, 'progress');
+
+            // 각 파일별 상태 표시 요소 생성
+            const fileStatuses = {};
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const div = document.createElement('div');
+                div.style.cssText = 'padding: 5px; margin: 2px 0; background: #fff; border-radius: 4px; font-size: 12px;';
+                div.innerHTML = `<strong>${file.name}</strong>: <span id="status-${i}">대기중...</span>`;
+                statusDiv.appendChild(div);
+                fileStatuses[i] = document.getElementById(`status-${i}`);
+            }
+
+            // 모든 파일을 동시에 업로드 (Promise.all)
+            const uploadPromises = Array.from(files).map((file, idx) => {
+                return uploadSingleFile(serverUrl, invokeId, file, idx, fileStatuses[idx]);
+            });
+
+            const results = await Promise.all(uploadPromises);
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+            const successCount = results.filter(r => r).length;
+
+            log(`[동시 업로드 완료] ${successCount}/${files.length} 성공, 소요시간: ${elapsed}초`, 'done');
+            loadFileList();
+        }
+
+        async function uploadSingleFile(serverUrl, invokeId, file, idx, statusEl) {
+            const formData = new FormData();
+            formData.append('attachFile_bin', file);
+            formData.append('attachFile_name', file.name);
+
+            statusEl.textContent = '업로드 중...';
+            statusEl.style.color = '#007bff';
+
+            try {
+                const response = await fetch(`${serverUrl}/upload/${invokeId}`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    statusEl.textContent = `실패 (${response.status})`;
+                    statusEl.style.color = '#dc3545';
+                    return false;
+                }
+
+                // SSE 처리
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.slice(6));
+                                if (data.type === 'progress') {
+                                    statusEl.textContent = `${data.percent}% - ${data.message}`;
+                                } else if (data.type === 'done') {
+                                    statusEl.textContent = '✅ 완료';
+                                    statusEl.style.color = '#28a745';
+                                } else if (data.type === 'error') {
+                                    statusEl.textContent = `❌ ${data.detail}`;
+                                    statusEl.style.color = '#dc3545';
+                                    return false;
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                }
+                return true;
+            } catch (e) {
+                statusEl.textContent = `❌ 네트워크 오류`;
+                statusEl.style.color = '#dc3545';
+                return false;
+            }
         }
 
         async function handleSSE(response, callback) {

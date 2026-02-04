@@ -10,20 +10,14 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 from app.services.chat_agent.graph_state import MainState, AgentSubState
 from app.services.chat_agent.prompts import (
-    SUMMARIZE_PROMPT,
     ANALYZE_REWRITE_PROMPT,
     AGENT_PROMPT,
     AGGREGATE_PROMPT,
     DEFAULT_CLARIFICATION_MESSAGE,
-    CROSS_VALIDATION_PROMPT
 )
 from app.services.chat_agent.tools import create_search_tool
-from app.services.utils.memory_service import memory_service
 from app.services.api_clients.llm_client import llm_client
 from app.core.config import settings
-
-# Neo4j 기반 LightRAG 서비스
-from app.services.rag.lightrag_service import lightrag_service
 
 logger = logging.getLogger(__name__)
 
@@ -52,54 +46,17 @@ async def _call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json
         return ""
 
 
-async def summarize_node(state: MainState) -> Dict[str, Any]:
-    """대화 요약 노드 - Redis에서 최근 대화를 가져와 요약"""
-    invoke_id = state.get("invoke_id", "")
+async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
+    """쿼리 분석 및 재작성 노드"""
     messages = state.get("messages", [])
+    filter_filename = state.get("filter_filename", None)
 
-    logger.info(f"[Summarize] invoke_id: {invoke_id}")
-
-    # 원본 쿼리 저장 (마지막 HumanMessage)
+    # 원본 쿼리 추출 (마지막 HumanMessage)
     original_query = ""
     for msg in reversed(messages):
         if isinstance(msg, HumanMessage):
             original_query = msg.content
             break
-
-    logger.info(f"[Summarize] original_query: {original_query[:100]}...")
-
-    # Redis에서 대화 히스토리 가져오기
-    try:
-        history = await memory_service.get_history(invoke_id)
-        if history and len(history) > 0:
-            # 최근 6개 메시지로 제한
-            recent_history = history[-6:]
-            conversation_text = "\n".join([
-                f"{'사용자' if msg['role'] == 'user' else 'AI'}: {msg['content'][:200]}"
-                for msg in recent_history
-            ])
-
-            prompt = SUMMARIZE_PROMPT.format(conversation_history=conversation_text)
-            summary = await _call_llm([{"role": "user", "content": prompt}], max_tokens=500)
-            logger.info(f"[Summarize] 요약 완료: {summary[:100]}...")
-        else:
-            summary = ""
-            logger.info("[Summarize] 히스토리 없음, 요약 스킵")
-    except Exception as e:
-        logger.error(f"Summarize failed: {e}")
-        summary = ""
-
-    return {
-        "original_query": original_query,
-        "conversation_summary": summary
-    }
-
-
-async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
-    """쿼리 분석 및 재작성 노드"""
-    original_query = state.get("original_query", "")
-    conversation_summary = state.get("conversation_summary", "")
-    filter_filename = state.get("filter_filename", None)
 
     # private chat: 파일명을 쿼리에 포함하여 문맥 제공
     query_for_analysis = original_query
@@ -109,10 +66,7 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
 
     logger.info(f"[Analyze] 쿼리 분석 시작: {query_for_analysis[:100]}...")
 
-    prompt = ANALYZE_REWRITE_PROMPT.format(
-        conversation_summary=conversation_summary or "(이전 대화 없음)",
-        user_query=query_for_analysis
-    )
+    prompt = ANALYZE_REWRITE_PROMPT.format(user_query=query_for_analysis)
 
     # JSON 스키마로 구조화된 응답 요청
     json_schema = {
@@ -165,8 +119,9 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
         rewritten_questions = result.get("rewritten_questions", [original_query])
         clarification_message = result.get("clarification_message", DEFAULT_CLARIFICATION_MESSAGE)
 
-        logger.debug(f"[Analyze] is_clear: {is_clear}")
-        logger.debug(f"[Analyze] rewritten_questions: {rewritten_questions}")
+        # 쿼리 분석 결과 로깅
+        logger.info(f"[Analyze] 원본 쿼리: {original_query}")
+        logger.info(f"[Analyze] 재작성 ({len(rewritten_questions)}개): {rewritten_questions}")
 
         # 명확화를 이미 1회 요청했으면 불명확하더라도 강제 진행
         if not is_clear and clarification_count >= 2:
@@ -183,6 +138,7 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
         clarification_message = ""
 
     update = {
+        "original_query": original_query,
         "question_is_clear": is_clear,
         "rewritten_questions": rewritten_questions,
         "clarification_message": clarification_message if not is_clear else None,
@@ -210,7 +166,7 @@ async def human_input_node(state: MainState) -> Dict[str, Any]:
 
 
 async def process_question_node(state: MainState) -> Dict[str, Any]:
-    """질문 처리 노드 - ColBERT 검색 기반 답변 생성"""
+    """질문 처리 노드 - 문서 검색 기반 답변 생성"""
     import asyncio
 
     invoke_id = state.get("invoke_id", "")
@@ -223,51 +179,31 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
     if not questions or not questions[0]:
         return {"agent_answers": []}
 
-    logger.info(f"[Process] {len(questions)}개 질문 배치 처리 시작 (필터: {filter_filename})")
+    # Open chat은 글로벌 인덱스 사용, Private chat은 사용자별 invoke_id 사용
+    search_invoke_id = invoke_id if filter_filename else settings.GLOBAL_INVOKE_ID
+
+    logger.info(f"[Process] {len(questions)}개 질문 배치 처리 시작 (인덱스: {search_invoke_id}, 필터: {filter_filename})")
     for i, q in enumerate(questions):
         logger.debug(f"  질문 {i+1}: {q}")
 
-    # 1. ColBERT 배치 검색 (모델 서버 원격 인덱스)
-    search_tool = create_search_tool(invoke_id)
-    colbert_task = search_tool.search_batch(questions, filter_filename=filter_filename)
+    # 1. 배치 검색 (모델 서버 원격 인덱스)
+    search_tool = create_search_tool(search_invoke_id)
+    search_results = await search_tool.search_batch(questions, filter_filename=filter_filename)
 
-    # 2. LightRAG 검색 (open chat에서만 사용, private chat은 ColBERT만 사용)
-    if not filter_filename:
-        async def search_lightrag(q):
-            try:
-                return await lightrag_service.search(q, invoke_id)
-            except Exception as e:
-                logger.error(f"LightRAG search error: {e}")
-                return ""
-
-        lightrag_tasks = [search_lightrag(q) for q in questions]
-        results = await asyncio.gather(colbert_task, *lightrag_tasks)
-        colbert_results = results[0]
-        lightrag_results = results[1:]
-    else:
-        colbert_results = await colbert_task
-        lightrag_results = [""] * len(questions)
-
-    # 3. 프롬프트 구성 + 답변 생성
-    def build_prompt(question: str, col_res: Dict, lightrag_ctx: str) -> str | None:
+    # 2. 프롬프트 구성 + 답변 생성
+    def build_prompt(question: str, doc_res: Dict) -> str | None:
         """검색 결과로부터 LLM 프롬프트를 구성한다. 결과가 없으면 None."""
-        colbert_context = col_res.get("context", "")
-        if not colbert_context and not lightrag_ctx:
+        doc_context = doc_res.get("context", "")
+        if not doc_context:
             return None
-        if lightrag_ctx:
-            return CROSS_VALIDATION_PROMPT.format(
-                colbert_context=colbert_context or "(ColBERT 검색 결과 없음)",
-                lightrag_context=lightrag_ctx,
-                question=question
-            )
-        return AGENT_PROMPT.format(context=colbert_context, question=question)
+        return AGENT_PROMPT.format(context=doc_context, question=question)
 
     single_question = len(questions) == 1
 
     if single_question:
         # 단일 질문: LLM 호출을 하지 않고 프롬프트만 저장 → SSE adapter에서 스트리밍
-        col_res = colbert_results[0]
-        prompt = build_prompt(questions[0], col_res, lightrag_results[0])
+        doc_res = search_results[0]
+        prompt = build_prompt(questions[0], doc_res)
 
         if prompt is None:
             no_result_msg = f"'{questions[0]}'에 대한 관련 문서를 찾지 못했습니다."
@@ -276,8 +212,8 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
             all_answers = [{
                 "question": questions[0],
                 "answer": "",  # 스트리밍에서 생성될 예정
-                "sources": col_res.get("references", []),
-                "rag_docs": col_res.get("results", []),  # 디버깅용 검색 결과
+                "sources": doc_res.get("references", []),
+                "rag_docs": doc_res.get("results", []),  # 디버깅용 검색 결과
                 "prompt": prompt
             }]
 
@@ -285,10 +221,10 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
         return {"agent_answers": all_answers}
 
     # 복수 질문: 각각 LLM 호출 (통합 시 필요)
-    async def generate_answer(idx: int, question: str, col_res: Dict, lightrag_ctx: str):
-        references = col_res.get("references", [])
-        rag_docs = col_res.get("results", [])
-        prompt = build_prompt(question, col_res, lightrag_ctx)
+    async def generate_answer(idx: int, question: str, doc_res: Dict):
+        references = doc_res.get("references", [])
+        rag_docs = doc_res.get("results", [])
+        prompt = build_prompt(question, doc_res)
 
         if prompt is None:
             return {
@@ -303,11 +239,11 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
         return {"idx": idx, "question": question, "answer": answer, "sources": references, "rag_docs": rag_docs}
 
     tasks = [
-        generate_answer(idx, questions[idx], colbert_results[idx], lightrag_results[idx])
+        generate_answer(idx, questions[idx], search_results[idx])
         for idx in range(len(questions))
     ]
 
-    logger.info(f"[Process] {len(tasks)}개 질문 답변 생성 중... (LightRAG 통합)")
+    logger.info(f"[Process] {len(tasks)}개 질문 답변 생성 중...")
     all_results = await asyncio.gather(*tasks)
 
     # 원래 순서대로 정렬 (idx 기준)

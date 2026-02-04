@@ -9,11 +9,10 @@ httpx                  # LLM/STT/Model 서버 통신
 
 # 3. Database
 redis                  # 대화 히스토리
-neo4j                  # LightRAG용 Graph DB 드라이버
+qdrant-client          # 벡터 DB (문서 임베딩 저장/검색)
 
 # 4. LangChain / LangGraph
 langchain-core         # 메시지, 프롬프트, 문서 타입
-langchain-neo4j        # Neo4j 그래프 연동
 langgraph              # LangGraph 에이전트 워크플로우
 
 # 5. Document Processing

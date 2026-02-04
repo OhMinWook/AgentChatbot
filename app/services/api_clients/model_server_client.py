@@ -1,50 +1,97 @@
 """
 모델 서버 클라이언트
 
-- ColBERT 인덱싱/검색 (원격 모델 서버에서 처리)
+- 텍스트 임베딩
+- Reranking
 - 키워드 추출
-- 지식 그래프 추출
-
-인덱스와 메타데이터는 모델 서버 측에서 관리합니다.
 """
 
+import asyncio
 import logging
-import time
 import httpx
-from typing import List, Dict, Optional, Any
-from dataclasses import dataclass
+from typing import List, Dict, Optional
+
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class SearchResult:
-    """ColBERT 검색 결과"""
-    doc_id: str
-    score: float
-    content: str
-    metadata: Dict[str, Any]
+def _is_retryable_error(exc: BaseException) -> bool:
+    """재시도 가능한 에러인지 판별"""
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (429, 502, 503)
+    return False
+
+
+async def _request_with_retry(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    max_retries: int = 2,
+    **kwargs
+) -> httpx.Response:
+    """
+    재시도 로직이 포함된 HTTP 요청
+
+    Args:
+        client: httpx.AsyncClient
+        method: HTTP 메서드 (GET, POST, DELETE 등)
+        url: 요청 URL
+        max_retries: 최대 재시도 횟수 (기본 2회, 총 3회 시도)
+        **kwargs: httpx 요청 인자 (json, headers, timeout 등)
+
+    Returns:
+        httpx.Response
+    """
+    last_error = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = await client.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response
+
+        except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+            last_error = e
+            if not _is_retryable_error(e) or attempt >= max_retries:
+                raise
+
+            wait_time = 2 ** attempt  # 1초, 2초, 4초...
+            if isinstance(e, httpx.HTTPStatusError):
+                logger.warning(f"[Retry] {url} failed (attempt {attempt + 1}/{max_retries + 1}): HTTP {e.response.status_code}, retrying in {wait_time}s...")
+            else:
+                logger.warning(f"[Retry] {url} failed (attempt {attempt + 1}/{max_retries + 1}): {type(e).__name__}, retrying in {wait_time}s...")
+
+            await asyncio.sleep(wait_time)
+
+    raise last_error
 
 
 class ModelServerClient:
     """
     외부 모델 서버와 통신
 
-    - ColBERT 인덱싱/검색 (원격)
+    - 텍스트 임베딩
+    - Reranking
     - 키워드 추출
-    - 지식 그래프 추출
     """
     def __init__(self):
         self.base_url = settings.MODEL_SERVER_URL
         self.headers = {"Content-Type": "application/json"}
-        self.timeout = settings.MODEL_SERVER_EMBED_TIMEOUT  # 10분 (대량 문서 임베딩용)
+        self.timeout = settings.MODEL_SERVER_EMBED_TIMEOUT
         self._async_client: Optional[httpx.AsyncClient] = None
 
     @property
     def async_client(self) -> httpx.AsyncClient:
         if self._async_client is None or self._async_client.is_closed:
-            self._async_client = httpx.AsyncClient(timeout=self.timeout)
+            limits = httpx.Limits(
+                max_keepalive_connections=20,
+                max_connections=50,
+                keepalive_expiry=30.0
+            )
+            self._async_client = httpx.AsyncClient(timeout=self.timeout, limits=limits)
         return self._async_client
 
     async def close(self):
@@ -53,233 +100,75 @@ class ModelServerClient:
             self._async_client = None
 
     # ========================================
-    # ColBERT 인덱싱/검색 API (원격)
+    # 임베딩 API
     # ========================================
 
-    async def colbert_index_documents(
+    async def embed_texts(
         self,
-        invoke_id: str,
-        documents: List[Dict]
-    ) -> Dict:
+        texts: List[str],
+        is_query: bool = False
+    ) -> List[List[float]]:
         """
-        문서를 모델 서버의 ColBERT 인덱스에 저장
+        텍스트 임베딩 생성 (순차 처리)
 
-        POST /colbert/index
-        Request: {"invoke_id": "...", "documents": [...]}
-        Response: {"indexed_count": N, "total_tokens": N}
+        POST /embed
         """
-        if not documents:
-            return {"indexed_count": 0, "total_tokens": 0}
-
-        url = f"{self.base_url}/colbert/index"
-        payload = {"invoke_id": invoke_id, "documents": documents}
-
-        logger.info(f"[ModelServer] colbert_index_documents: {len(documents)}개 문서, invoke_id={invoke_id}")
-
-        try:
-            start = time.time()
-            response = await self.async_client.post(url, json=payload, headers=self.headers)
-            response.raise_for_status()
-            elapsed = time.time() - start
-
-            result = response.json()
-            logger.info(f"[ModelServer] colbert_index_documents 완료: {result.get('indexed_count', 0)}개 인덱싱 ({elapsed:.2f}s)")
-            return result
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Model Server Error (ColBERT Index): {e.response.text}")
-            raise e
-        except httpx.RequestError as e:
-            logger.error(f"Model Server Connection Error (ColBERT Index): {e}")
-            raise e
-
-    async def colbert_search(
-        self,
-        invoke_id: str,
-        query: str,
-        top_k: int = 6
-    ) -> List[SearchResult]:
-        """
-        모델 서버에서 ColBERT 검색 수행
-
-        POST /colbert/search
-        Request: {"invoke_id": "...", "query": "...", "top_k": N}
-        Response: {"results": [{"doc_id": "...", "score": N, "content": "...", "metadata": {...}}]}
-        """
-        url = f"{self.base_url}/colbert/search"
-        payload = {"invoke_id": invoke_id, "query": query, "top_k": top_k}
-
-        try:
-            response = await self.async_client.post(
-                url, json=payload, headers=self.headers,
-                timeout=settings.MODEL_SERVER_QUERY_TIMEOUT
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            results = []
-            for item in data.get("results", []):
-                results.append(SearchResult(
-                    doc_id=item.get("doc_id", ""),
-                    score=float(item.get("score", 0.0)),
-                    content=item.get("content", ""),
-                    metadata=item.get("metadata", {})
-                ))
-            return results
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Model Server Error (ColBERT Search): {e.response.text}")
-            raise e
-        except httpx.RequestError as e:
-            logger.error(f"Model Server Connection Error (ColBERT Search): {e}")
-            raise e
-
-    async def colbert_search_batch(
-        self,
-        invoke_id: str,
-        queries: List[str],
-        top_k: int = 6
-    ) -> List[List[SearchResult]]:
-        """
-        모델 서버에서 ColBERT 배치 검색 수행
-
-        POST /colbert/search/batch
-        Request: {"invoke_id": "...", "queries": [...], "top_k": N}
-        Response: {"results": [[...], [...]]}
-        """
-        if not queries:
+        if not texts:
             return []
 
-        url = f"{self.base_url}/colbert/search/batch"
-        payload = {"invoke_id": invoke_id, "queries": queries, "top_k": top_k}
+        url = f"{self.base_url}/embed"
+        payload = {"texts": texts, "is_query": is_query}
 
         try:
-            response = await self.async_client.post(
-                url, json=payload, headers=self.headers,
-                timeout=settings.MODEL_SERVER_QUERY_TIMEOUT
+            response = await _request_with_retry(
+                self.async_client, "POST", url,
+                json=payload, headers=self.headers
             )
-            response.raise_for_status()
-            data = response.json()
-
-            all_results = []
-            for query_results in data.get("results", []):
-                results = []
-                for item in query_results:
-                    results.append(SearchResult(
-                        doc_id=item.get("doc_id", ""),
-                        score=float(item.get("score", 0.0)),
-                        content=item.get("content", ""),
-                        metadata=item.get("metadata", {})
-                    ))
-                all_results.append(results)
-            return all_results
+            return response.json().get("embeddings", [])
         except httpx.HTTPStatusError as e:
-            logger.error(f"Model Server Error (ColBERT Batch Search): {e.response.text}")
-            raise e
+            logger.error(f"Model Server Error (Embed): {e.response.text}")
+            raise
         except httpx.RequestError as e:
-            logger.error(f"Model Server Connection Error (ColBERT Batch Search): {e}")
-            raise e
+            logger.error(f"Model Server Connection Error (Embed): {e}")
+            raise
 
-    async def colbert_store_document_metadata(
+    # ========================================
+    # Reranking API
+    # ========================================
+
+    async def rerank(
         self,
-        invoke_id: str,
-        file_name: str,
-        total_pages: int,
-        total_chunks: int
-    ) -> None:
-        """
-        문서 메타데이터를 모델 서버에 저장
-
-        POST /colbert/index/{invoke_id}/metadata
-        """
-        url = f"{self.base_url}/colbert/index/{invoke_id}/metadata"
-        payload = {
-            "file_name": file_name,
-            "total_pages": total_pages,
-            "total_chunks": total_chunks
-        }
-
-        try:
-            response = await self.async_client.post(url, json=payload, headers=self.headers)
-            response.raise_for_status()
-            logger.info(f"[ModelServer] 문서 메타데이터 저장 완료: {file_name}")
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Model Server Error (Store Metadata): {e.response.text}")
-            raise e
-        except httpx.RequestError as e:
-            logger.error(f"Model Server Connection Error (Store Metadata): {e}")
-            raise e
-
-    async def colbert_get_document_metadata(
-        self,
-        invoke_id: str,
-        file_name: str
-    ) -> Optional[Dict]:
-        """
-        문서 메타데이터 조회
-
-        GET /colbert/index/{invoke_id}/metadata/{file_name}
-        """
-        url = f"{self.base_url}/colbert/index/{invoke_id}/metadata/{file_name}"
-
-        try:
-            response = await self.async_client.get(url, headers=self.headers)
-            if response.status_code == 404:
-                return None
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                return None
-            logger.error(f"Model Server Error (Get Metadata): {e.response.text}")
-            raise e
-        except httpx.RequestError as e:
-            logger.error(f"Model Server Connection Error (Get Metadata): {e}")
-            raise e
-
-    async def colbert_list_documents(
-        self,
-        invoke_id: str
+        query: str,
+        documents: List[str],
+        top_k: int = 10
     ) -> List[Dict]:
         """
-        인덱싱된 문서 목록 조회
+        문서 재정렬 (Cross-encoder Reranking)
 
-        GET /colbert/index/{invoke_id}/documents
+        POST /rerank
+
+        Returns:
+            [{"index": 0, "score": 0.95, "content": "..."}, ...]
         """
-        url = f"{self.base_url}/colbert/index/{invoke_id}/documents"
-
-        try:
-            response = await self.async_client.get(url, headers=self.headers)
-            response.raise_for_status()
-            return response.json().get("documents", [])
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Model Server Error (List Documents): {e.response.text}")
-            return []
-        except httpx.RequestError as e:
-            logger.error(f"Model Server Connection Error (List Documents): {e}")
+        if not documents:
             return []
 
-    async def colbert_delete_index(
-        self,
-        invoke_id: str
-    ) -> Dict:
-        """
-        인덱스 삭제
-
-        DELETE /colbert/index/{invoke_id}
-        """
-        url = f"{self.base_url}/colbert/index/{invoke_id}"
+        url = f"{self.base_url}/rerank"
+        payload = {"query": query, "documents": documents, "top_k": top_k}
 
         try:
-            response = await self.async_client.delete(url, headers=self.headers)
-            response.raise_for_status()
-            result = response.json()
-            logger.info(f"[ModelServer] 인덱스 삭제 완료: {invoke_id}")
-            return result
+            response = await _request_with_retry(
+                self.async_client, "POST", url,
+                json=payload, headers=self.headers,
+                timeout=settings.MODEL_SERVER_QUERY_TIMEOUT
+            )
+            return response.json().get("results", [])
         except httpx.HTTPStatusError as e:
-            logger.error(f"Model Server Error (Delete Index): {e.response.text}")
-            raise e
+            logger.error(f"Model Server Error (Rerank): {e.response.text}")
+            raise
         except httpx.RequestError as e:
-            logger.error(f"Model Server Connection Error (Delete Index): {e}")
-            raise e
+            logger.error(f"Model Server Connection Error (Rerank): {e}")
+            raise
 
     # ========================================
     # 키워드 추출 API
@@ -288,7 +177,6 @@ class ModelServerClient:
     async def extract_keywords_batch(self, texts: List[str]) -> List[str]:
         """
         텍스트 배치에서 키워드 추출
-        Returns: 각 청크의 키워드 문자열 목록
         """
         if not texts:
             return []
@@ -297,42 +185,18 @@ class ModelServerClient:
         payload = {"texts": texts}
 
         try:
-            response = await self.async_client.post(url, json=payload, headers=self.headers, timeout=settings.MODEL_SERVER_KEYWORD_TIMEOUT)
-            response.raise_for_status()
+            response = await _request_with_retry(
+                self.async_client, "POST", url,
+                json=payload, headers=self.headers,
+                timeout=settings.MODEL_SERVER_KEYWORD_TIMEOUT
+            )
             return response.json()["keywords"]
         except httpx.HTTPStatusError as e:
             logger.error(f"Model Server Error (Keyword Extraction): {e.response.text}")
-            raise e
+            raise
         except (httpx.RequestError, KeyError) as e:
             logger.error(f"Model Server Connection Error (Keyword Extraction): {e}")
-            raise e
-
-    # ========================================
-    # 지식 그래프 추출 API (LightRAG)
-    # ========================================
-
-    async def extract_graph_batch(self, texts: List[str]) -> List[Dict]:
-        """
-        텍스트 배치에서 엔티티 및 관계 추출 (LightRAG용)
-        Returns: [{"entities": [...], "relationships": [...]}, ...]
-        """
-        if not texts:
-            return []
-
-        url = f"{self.base_url}/extract_graph"
-        payload = {"texts": texts}
-
-        try:
-            # 배치 처리는 시간이 오래 걸릴 수 있으므로 넉넉한 타임아웃 설정
-            response = await self.async_client.post(url, json=payload, headers=self.headers, timeout=settings.MODEL_SERVER_GRAPH_TIMEOUT)
-            response.raise_for_status()
-            return response.json()["results"]
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Model Server Error (Graph Extraction): {e.response.text}")
-            return [{"entities": [], "relationships": []}] * len(texts)
-        except Exception as e:
-            logger.error(f"Model Server Connection Error (Graph Extraction): {e}")
-            return [{"entities": [], "relationships": []}] * len(texts)
+            raise
 
     # ========================================
     # 헬스 체크

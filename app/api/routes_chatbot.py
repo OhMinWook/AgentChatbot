@@ -1,4 +1,3 @@
-import os
 import json
 import asyncio
 import logging
@@ -9,14 +8,14 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 from app.services.utils.memory_service import memory_service
-from app.services.utils.path_validator import safe_join
 from app.services.utils.file_utils import save_upload_file
 from app.services.utils.sse_utils import create_sse_data, create_sse_response, SSEType
 from app.services.rag.rag_ingestion_service import rag_ingestion_service
 from app.services.chat_agent.sse_adapter import sse_graph_adapter
 from app.services.api_clients.llm_client import llm_client
-from app.services.api_clients.model_server_client import model_server_client, SearchResult
 from app.services.prompt_builders.document_summary_prompt_builder import document_summary_prompt_builder
+from app.services.chat_agent.tools import create_search_tool
+from app.services.rag.qdrant_service import qdrant_service
 
 router = APIRouter()
 
@@ -218,32 +217,45 @@ async def continue_conversation(
 @router.get("/files/{invokeId}", summary="업로드된 파일 목록 조회")
 async def get_uploaded_files(invokeId: str):
     """
-    특정 invokeId(대화방)에 업로드된 파일 이름 목록을 반환합니다.
-    (정렬: 최신 파일 -> 오래된 파일 순)
+    특정 invokeId(대화방)에 인덱싱된 파일 목록을 반환합니다.
+    Qdrant에서 조회하므로 실제 검색 가능한 파일만 표시됩니다.
     """
     try:
-        upload_dir = safe_join(settings.UPLOAD_DIR, invokeId)
+        doc_list = await qdrant_service.get_document_list(invokeId)
 
-        if not os.path.exists(upload_dir):
-            return {"files": []}
-            
-        # 파일명과 전체 경로를 함께 가져옴
-        files_with_path = []
-        for f in os.listdir(upload_dir):
-            full_path = os.path.join(upload_dir, f)
-            if os.path.isfile(full_path):
-                files_with_path.append((f, full_path))
-        
-        # 수정 시간(getmtime) 기준으로 내림차순 정렬 (최신 -> 오래된 것)
-        files_with_path.sort(key=lambda x: os.path.getmtime(x[1]), reverse=True)
-        
-        # 파일명만 추출하여 반환
-        sorted_files = [f[0] for f in files_with_path]
-        
-        return {"files": sorted_files}
+        # 파일명만 추출
+        files = [doc["file_name"] for doc in doc_list]
+
+        return {"files": files}
 
     except Exception as e:
         logger.error(f"[File List Error] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/history/{invokeId}", summary="대화 기록 조회")
+async def get_chat_history(invokeId: str):
+    """
+    특정 invokeId(대화방)의 대화 기록을 반환합니다.
+
+    Returns:
+        {
+            "invokeId": "...",
+            "history": [
+                {"role": "user", "content": "..."},
+                {"role": "assistant", "content": "..."},
+                ...
+            ]
+        }
+    """
+    try:
+        history = await memory_service.get_history(invokeId)
+        return {
+            "invokeId": invokeId,
+            "history": history or []
+        }
+    except Exception as e:
+        logger.error(f"[History Error] {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -255,37 +267,42 @@ async def summarize_document(
     """
     업로드된 문서를 체계적으로 요약합니다.
 
-    - **20페이지 미만**: 단순 검색 후 요약 (LLM 1회)
-    - **20페이지 이상**: 질문 분해 → 병렬 분석 → 통합 (LLM 5회)
+    - **100청크 미만**: 단순 검색 후 요약 (LLM 1회)
+    - **100청크 이상**: 질문 분해 → 병렬 분석 → 통합 (LLM 5회)
 
     SSE를 통해 실시간 진행률을 전송합니다.
     """
+    # 청크 수 기준 대용량 문서 임계값 (약 20페이지 * 5청크)
+    LARGE_DOC_CHUNK_THRESHOLD = 100
+
     async def event_stream():
         try:
-            # 1. 문서 메타데이터 조회
+            # 1. 문서 정보 조회 (Qdrant에서 청크 수 확인)
             yield create_sse_data({"type": SSEType.PROGRESS, "percent": 5, "message": "문서 정보 확인 중..."})
 
-            doc_meta = await model_server_client.colbert_get_document_metadata(invokeId, target_filename)
+            doc_list = await qdrant_service.get_document_list(invokeId)
+            doc_info = next((d for d in doc_list if d["file_name"] == target_filename), None)
 
-            if not doc_meta:
+            if not doc_info:
                 yield create_sse_data({"type": SSEType.ERROR, "detail": f"문서를 찾을 수 없습니다: {target_filename}"})
                 return
 
-            total_pages = doc_meta["total_pages"]
+            total_chunks = doc_info["total_chunks"]
+            search_tool = create_search_tool(invokeId)
 
-            # 2. 페이지 수에 따른 방식 분기
-            if document_summary_prompt_builder.needs_decomposition(total_pages):
-                # ===== 20페이지 이상: 질문 분해 방식 =====
+            # 2. 청크 수에 따른 방식 분기
+            if total_chunks >= LARGE_DOC_CHUNK_THRESHOLD:
+                # ===== 대용량 문서: 질문 분해 방식 =====
                 questions = document_summary_prompt_builder.get_questions()
                 question_count = len(questions)
 
                 yield create_sse_data({
                     "type": SSEType.PROGRESS,
                     "percent": 10,
-                    "message": f"대용량 문서 ({total_pages}페이지), 질문 분해 방식으로 분석"
+                    "message": f"대용량 문서 ({total_chunks}청크), 질문 분해 방식으로 분석"
                 })
 
-                # ColBERT 배치 검색
+                # 배치 검색 (Qdrant + Reranker)
                 yield create_sse_data({
                     "type": SSEType.PROGRESS,
                     "percent": 20,
@@ -293,8 +310,8 @@ async def summarize_document(
                 })
 
                 query_texts = [q["question"] for q in questions]
-                batch_results = await model_server_client.colbert_search_batch(
-                    invokeId, query_texts, top_k=settings.COLBERT_TOP_K
+                batch_results = await search_tool.search_batch(
+                    query_texts, top_k=settings.SEARCH_TOP_K, filter_filename=target_filename
                 )
 
                 # LLM 병렬 호출 준비
@@ -308,23 +325,16 @@ async def summarize_document(
                 llm_tasks = []
 
                 for i, q in enumerate(questions):
-                    search_results = batch_results[i] if i < len(batch_results) else []
+                    search_result = batch_results[i] if i < len(batch_results) else {"results": [], "references": []}
+                    filtered_chunks = search_result.get("results", [])
+                    refs = search_result.get("references", [])
 
-                    filtered_chunks = [
-                        r for r in search_results
-                        if r.metadata.get("source") == target_filename
-                    ]
+                    for ref in refs:
+                        if ref not in all_references:
+                            all_references.append(ref)
 
                     if filtered_chunks:
-                        for chunk in filtered_chunks:
-                            ref = {
-                                "source": chunk.metadata.get("source", ""),
-                                "page": chunk.metadata.get("page", 0)
-                            }
-                            if ref not in all_references:
-                                all_references.append(ref)
-
-                        context = "\n\n---\n\n".join([c.content for c in filtered_chunks])
+                        context = "\n\n---\n\n".join([c.get("content", "") for c in filtered_chunks])
                         payload = document_summary_prompt_builder.build_qa_payload(q["question"], context)
                         llm_tasks.append((q["key"], llm_client.chat_completions(payload)))
                     else:
@@ -360,38 +370,27 @@ async def summarize_document(
                 summary = llm_client.extract_content(merge_response)
 
             else:
-                # ===== 20페이지 미만: 단순 검색 방식 =====
+                # ===== 소형 문서: 단순 검색 방식 =====
                 yield create_sse_data({
                     "type": SSEType.PROGRESS,
                     "percent": 20,
-                    "message": f"문서 검색 중 ({total_pages}페이지)..."
+                    "message": f"문서 검색 중 ({total_chunks}청크)..."
                 })
 
-                # 단일 검색 쿼리
+                # 단일 검색 (Qdrant + Reranker)
                 search_query = f"{target_filename} 요약"
-                search_results = await model_server_client.colbert_search(
-                    invokeId, search_query, top_k=settings.COLBERT_TOP_K
+                search_result = await search_tool.search(
+                    search_query, top_k=settings.SEARCH_TOP_K, filter_filename=target_filename
                 )
 
-                filtered_chunks = [
-                    r for r in search_results
-                    if r.metadata.get("source") == target_filename
-                ]
+                filtered_chunks = search_result.get("results", [])
+                all_references = search_result.get("references", [])
 
-                all_references = []
-                if filtered_chunks:
-                    for chunk in filtered_chunks:
-                        ref = {
-                            "source": chunk.metadata.get("source", ""),
-                            "page": chunk.metadata.get("page", 0)
-                        }
-                        if ref not in all_references:
-                            all_references.append(ref)
-
-                    context = "\n\n---\n\n".join([c.content for c in filtered_chunks])
-                else:
+                if not filtered_chunks:
                     yield create_sse_data({"type": SSEType.ERROR, "detail": "문서 내용을 찾을 수 없습니다."})
                     return
+
+                context = "\n\n---\n\n".join([c.get("content", "") for c in filtered_chunks])
 
                 yield create_sse_data({
                     "type": SSEType.PROGRESS,

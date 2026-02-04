@@ -6,8 +6,7 @@ markitdown_packages/
 uploaded_files/
 __pycache__/
 libs
-#debug_ai
-colbert_indexes
+debug_ai
 *.whl
 *.mp3
 *.m4a

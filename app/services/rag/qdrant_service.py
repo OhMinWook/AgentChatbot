@@ -216,9 +216,10 @@ class QdrantService:
         sparse_vector: Dict[str, List],
         top_k: int = 30,
         filter_source: Optional[str] = None,
+        dense_weight: float = 0.8,
     ) -> List[SearchResult]:
         """
-        Hybrid 검색 (Dense + Sparse RRF Fusion)
+        Hybrid 검색 (Dense + Sparse 가중 합계, 정규화 적용)
 
         Args:
             invoke_id: 룸/세션 ID
@@ -226,10 +227,13 @@ class QdrantService:
             sparse_vector: Sparse 쿼리 벡터 {"indices": [...], "values": [...]}
             top_k: 반환할 결과 수
             filter_source: 특정 파일명으로 필터링 (Private chat용)
+            dense_weight: Dense 가중치 (기본 0.8, Sparse는 1-dense_weight)
 
         Returns:
-            SearchResult 리스트 (RRF score 내림차순)
+            SearchResult 리스트 (가중 합계 점수 내림차순)
         """
+        sparse_weight = 1.0 - dense_weight
+
         try:
             # 필터 조건 구성
             filter_conditions = [
@@ -263,42 +267,73 @@ class QdrantService:
 
             query_filter = models.Filter(must=filter_conditions)
 
-            # Hybrid Query with RRF Fusion
-            results = await self.client.query_points(
+            # 1. Dense 검색
+            dense_results = await self.client.query_points(
                 collection_name=settings.QDRANT_COLLECTION,
-                prefetch=[
-                    models.Prefetch(
-                        query=dense_embedding,
-                        using="dense",
-                        limit=top_k,
-                    ),
-                    models.Prefetch(
-                        query=models.SparseVector(
-                            indices=sparse_vector["indices"],
-                            values=sparse_vector["values"],
-                        ),
-                        using="sparse",
-                        limit=top_k,
-                    ),
-                ],
-                query=models.FusionQuery(fusion=models.Fusion.RRF),
+                query=dense_embedding,
+                using="dense",
                 query_filter=query_filter,
                 limit=top_k,
             )
 
+            # 2. Sparse 검색
+            sparse_results = await self.client.query_points(
+                collection_name=settings.QDRANT_COLLECTION,
+                query=models.SparseVector(
+                    indices=sparse_vector["indices"],
+                    values=sparse_vector["values"],
+                ),
+                using="sparse",
+                query_filter=query_filter,
+                limit=top_k,
+            )
+
+            # 3. Dense는 코사인 유사도(0~1), Sparse만 Min-Max 정규화
+            dense_scores = {p.id: p.score for p in dense_results.points}
+
+            sparse_scores = {}
+            if sparse_results.points:
+                scores = [p.score for p in sparse_results.points]
+                min_s, max_s = min(scores), max(scores)
+                range_s = max_s - min_s if max_s > min_s else 1.0
+                sparse_scores = {
+                    p.id: (p.score - min_s) / range_s
+                    for p in sparse_results.points
+                }
+
+            # 4. 가중 합계
+            all_ids = set(dense_scores.keys()) | set(sparse_scores.keys())
+            combined_scores = {}
+            for pid in all_ids:
+                d_score = dense_scores.get(pid, 0.0)
+                s_score = sparse_scores.get(pid, 0.0)
+                combined_scores[pid] = dense_weight * d_score + sparse_weight * s_score
+
+            # 5. 정렬 및 top_k
+            sorted_ids = sorted(combined_scores.keys(), key=lambda x: combined_scores[x], reverse=True)[:top_k]
+
+            # 6. payload 매핑
+            payload_map = {}
+            for p in dense_results.points:
+                payload_map[p.id] = p.payload
+            for p in sparse_results.points:
+                if p.id not in payload_map:
+                    payload_map[p.id] = p.payload
+
             return [
                 SearchResult(
-                    doc_id=hit.payload.get("doc_id", ""),
-                    score=hit.score,
-                    content=hit.payload.get("content", ""),
+                    doc_id=payload_map[pid].get("doc_id", ""),
+                    score=combined_scores[pid],
+                    content=payload_map[pid].get("content", ""),
                     metadata={
-                        "source": hit.payload.get("source", ""),
-                        "page": hit.payload.get("page", 0),
-                        "prev_chunk_id": hit.payload.get("prev_chunk_id"),
-                        "next_chunk_id": hit.payload.get("next_chunk_id"),
+                        "source": payload_map[pid].get("source", ""),
+                        "page": payload_map[pid].get("page", 0),
+                        "prev_chunk_id": payload_map[pid].get("prev_chunk_id"),
+                        "next_chunk_id": payload_map[pid].get("next_chunk_id"),
                     }
                 )
-                for hit in results.points
+                for pid in sorted_ids
+                if pid in payload_map
             ]
         except UnexpectedResponse as e:
             logger.error(f"[Qdrant] Hybrid search failed: {e}")

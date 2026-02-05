@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class AdminDocumentService:
     """관리자 문서 관리 전용 서비스"""
 
-    EMBED_BATCH_SIZE = 50
+    EMBED_BATCH_SIZE = 40
 
     def __init__(self):
         self._client: Optional[AsyncQdrantClient] = None

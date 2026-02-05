@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def _is_retryable_error(exc: BaseException) -> bool:
     """재시도 가능한 에러인지 판별"""
-    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)):
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError)):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in (429, 502, 503)
@@ -53,7 +53,7 @@ async def _request_with_retry(
             response.raise_for_status()
             return response
 
-        except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+        except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
             last_error = e
             if not _is_retryable_error(e) or attempt >= max_retries:
                 raise

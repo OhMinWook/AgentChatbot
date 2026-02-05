@@ -80,7 +80,9 @@ AGGREGATE = PromptPair(
 ## 에이전트 답변들
 {agent_answers}
 
-위 답변들을 하나의 일관된 답변으로 통합하세요."""
+위 답변들을 하나의 일관된 답변으로 통합하세요.
+## 원본 질문
+{original_query}"""
 )
 
 

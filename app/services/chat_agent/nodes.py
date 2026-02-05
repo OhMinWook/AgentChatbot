@@ -10,9 +10,9 @@ from langchain_core.messages import HumanMessage, AIMessage
 
 from app.services.chat_agent.graph_state import MainState, AgentSubState
 from app.services.chat_agent.prompts import (
-    ANALYZE_REWRITE_PROMPT,
-    AGENT_PROMPT,
-    AGGREGATE_PROMPT,
+    ANALYZE_REWRITE,
+    AGENT,
+    AGGREGATE,
     DEFAULT_CLARIFICATION_MESSAGE,
 )
 from app.services.chat_agent.tools import create_search_tool
@@ -29,7 +29,7 @@ async def _call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json
             "model": settings.VLLM_MODEL,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0
+            "temperature": settings.DEFAULT_TEMPERATURE
         }
 
         # vLLM structured_outputs (JSON 양식 고정)
@@ -66,8 +66,6 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
 
     logger.info(f"[Analyze] 쿼리 분석 시작: {query_for_analysis[:100]}...")
 
-    prompt = ANALYZE_REWRITE_PROMPT.format(user_query=query_for_analysis)
-
     # JSON 스키마로 구조화된 응답 요청
     json_schema = {
         "type": "object",
@@ -84,7 +82,10 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
     }
 
     response = await _call_llm(
-        [{"role": "user", "content": prompt}],
+        [
+            {"role": "system", "content": ANALYZE_REWRITE.system},
+            {"role": "user", "content": ANALYZE_REWRITE.user.format(user_query=query_for_analysis)}
+        ],
         max_tokens=1024,
         json_schema=json_schema
     )
@@ -191,30 +192,33 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
     search_results = await search_tool.search_batch(questions, filter_filename=filter_filename)
 
     # 2. 프롬프트 구성 + 답변 생성
-    def build_prompt(question: str, doc_res: Dict) -> str | None:
-        """검색 결과로부터 LLM 프롬프트를 구성한다. 결과가 없으면 None."""
+    def build_messages(question: str, doc_res: Dict) -> List[Dict[str, str]] | None:
+        """검색 결과로부터 LLM 메시지를 구성한다. 결과가 없으면 None."""
         doc_context = doc_res.get("context", "")
         if not doc_context:
             return None
-        return AGENT_PROMPT.format(context=doc_context, question=question)
+        return [
+            {"role": "system", "content": AGENT.system},
+            {"role": "user", "content": AGENT.user.format(context=doc_context, question=question)}
+        ]
 
     single_question = len(questions) == 1
 
     if single_question:
-        # 단일 질문: LLM 호출을 하지 않고 프롬프트만 저장 → SSE adapter에서 스트리밍
+        # 단일 질문: LLM 호출을 하지 않고 메시지만 저장 → SSE adapter에서 스트리밍
         doc_res = search_results[0]
-        prompt = build_prompt(questions[0], doc_res)
+        messages = build_messages(questions[0], doc_res)
 
-        if prompt is None:
+        if messages is None:
             no_result_msg = f"'{questions[0]}'에 대한 관련 문서를 찾지 못했습니다."
-            all_answers = [{"question": questions[0], "answer": no_result_msg, "sources": [], "rag_docs": [], "prompt": None}]
+            all_answers = [{"question": questions[0], "answer": no_result_msg, "sources": [], "rag_docs": [], "messages": None}]
         else:
             all_answers = [{
                 "question": questions[0],
                 "answer": "",  # 스트리밍에서 생성될 예정
                 "sources": doc_res.get("references", []),
                 "rag_docs": doc_res.get("results", []),  # 디버깅용 검색 결과
-                "prompt": prompt
+                "messages": messages
             }]
 
         logger.info("[Process] 단일 질문 - 스트리밍 준비 완료")
@@ -224,9 +228,9 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
     async def generate_answer(idx: int, question: str, doc_res: Dict):
         references = doc_res.get("references", [])
         rag_docs = doc_res.get("results", [])
-        prompt = build_prompt(question, doc_res)
+        messages = build_messages(question, doc_res)
 
-        if prompt is None:
+        if messages is None:
             return {
                 "idx": idx,
                 "question": question,
@@ -235,7 +239,7 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
                 "rag_docs": []
             }
 
-        answer = await _call_llm([{"role": "user", "content": prompt}], max_tokens=settings.DEFAULT_MAX_TOKENS)
+        answer = await _call_llm(messages, max_tokens=settings.DEFAULT_MAX_TOKENS)
         return {"idx": idx, "question": question, "answer": answer, "sources": references, "rag_docs": rag_docs}
 
     tasks = [
@@ -273,15 +277,15 @@ async def aggregate_node(state: MainState) -> Dict[str, Any]:
 
     if len(agent_answers) == 1:
         answer = agent_answers[0]
-        prompt = answer.get("prompt")
-        if prompt:
-            # 단일 질문 + 프롬프트 있음 → vLLM 스트리밍
+        messages = answer.get("messages")
+        if messages:
+            # 단일 질문 + 메시지 있음 → vLLM 스트리밍
             logger.info("[Aggregate] 단일 답변 스트리밍 준비")
             return {
                 "messages": [AIMessage(content="")],
                 "streaming_payload": {
                     "precomputed": False,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": messages,
                     "max_tokens": settings.DEFAULT_MAX_TOKENS
                 }
             }
@@ -297,8 +301,10 @@ async def aggregate_node(state: MainState) -> Dict[str, Any]:
     for i, ans in enumerate(agent_answers):
         answers_text += f"\n### 답변 {i+1}\n{ans.get('answer', '')}\n"
 
-    prompt = AGGREGATE_PROMPT.format(original_query=original_query, agent_answers=answers_text)
-    messages = [{"role": "user", "content": prompt}]
+    messages = [
+        {"role": "system", "content": AGGREGATE.system},
+        {"role": "user", "content": AGGREGATE.user.format(original_query=original_query, agent_answers=answers_text)}
+    ]
 
     logger.info(f"[Aggregate] 복수 답변 통합 스트리밍 준비")
     return {
@@ -317,7 +323,7 @@ async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 20
         "model": settings.VLLM_MODEL,
         "messages": messages,
         "max_tokens": max_tokens,
-        "temperature": 0
+        "temperature": settings.DEFAULT_TEMPERATURE
     }
 
     try:

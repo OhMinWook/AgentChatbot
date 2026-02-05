@@ -8,15 +8,13 @@ import logging
 from typing import List, Dict, Any
 from app.services.api_clients.model_server_client import model_server_client
 from app.services.rag.qdrant_service import qdrant_service
+from app.services.rag.sparse_encoder import sparse_encoder
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 # Reranker 후보 수 (Qdrant에서 가져올 개수)
 RERANK_CANDIDATES = 30
-
-# 인접 청크에서 가져올 추가 컨텍스트 크기 (글자 수)
-CONTEXT_EXPAND_SIZE = 1500
 
 
 class SearchTool:
@@ -27,7 +25,7 @@ class SearchTool:
 
     async def search(self, query: str, top_k: int = None, filter_filename: str = None) -> Dict[str, Any]:
         """
-        문서 검색 수행 (Qdrant + Reranker)
+        문서 검색 수행 (Hybrid: Dense + Sparse → RRF → Reranker)
 
         Returns:
             {
@@ -41,17 +39,22 @@ class SearchTool:
         logger.info(f"[Search] query: {query[:50]}...")
         logger.debug(f"[Search] invoke_id: {self.invoke_id}, top_k: {k}, filter: {filter_filename}")
 
-        # 1. 쿼리 임베딩 생성
+        # 1. Dense 쿼리 임베딩 생성
         embeddings = await model_server_client.embed_texts([query], is_query=True)
         if not embeddings:
             return {"context": None, "references": [], "results": []}
         query_embedding = embeddings[0]
 
-        # 2. Qdrant에서 후보 검색
-        candidates = await qdrant_service.search(
+        # 2. Sparse 쿼리 임베딩 생성 (BM25 스타일)
+        query_sparse = sparse_encoder.encode(query)
+
+        # 3. Qdrant Hybrid 검색 (Dense + Sparse RRF Fusion)
+        candidates = await qdrant_service.search_hybrid(
             invoke_id=self.invoke_id,
-            query_embedding=query_embedding,
-            top_k=RERANK_CANDIDATES
+            dense_embedding=query_embedding,
+            sparse_vector=query_sparse,
+            top_k=RERANK_CANDIDATES,
+            filter_source=filter_filename
         )
 
         logger.info(f"[Search] Qdrant 후보: {len(candidates)}개")
@@ -78,11 +81,11 @@ class SearchTool:
             if len(results) >= k:
                 break
 
-            # # 점수 필터링 (0.6 미만은 제외)
-            # score = r.get("score", 0.0)
-            # if score < 0.6:
-            #     logger.debug(f"[Search] 낮은 점수 스킵: {score:.3f}")
-            #     continue
+            # 점수 필터링 (최소 2개 보장, 이후 0.55 미만 제외)
+            score = r.get("score", 0.0)
+            if len(results) >= 2 and score < 0.55:
+                logger.debug(f"[Search] 낮은 점수 스킵: {score:.3f}")
+                continue
 
             orig_idx = r.get("index", 0)
             if orig_idx >= len(candidates):
@@ -115,33 +118,96 @@ class SearchTool:
 
         logger.info(f"[Search] 인접 청크 필터링 후: {len(results)}개")
 
-        # 필터링
-        filtered_results = []
-        references = []
+        if not results:
+            return {"context": None, "references": [], "results": []}
 
+        # 5. 참조 목록 생성
+        references = []
         for doc in results:
             metadata = doc.get("metadata", {})
             source = metadata.get("source", "unknown")
             page = metadata.get("page", 0)
-
-            # 파일명 필터링 (정확한 파일명 비교)
-            if filter_filename and source != filter_filename:
-                continue
-
-            filtered_results.append(doc)
-
-            ref = {"source": source, "page": page}
+            # open chat은 페이지 정보 없이 제공
+            ref = {"source": source, "page": page if filter_filename else None}
             if ref not in references:
                 references.append(ref)
 
-        if not filtered_results:
-            return {"context": None, "references": [], "results": results}
+        # 6. 결과가 2개 이하면 다음(오른쪽) 청크 2개씩 추가 (문맥 보강, 점수 무관)
+        if len(results) <= 2:
+            results = await self._append_following_chunks(results, count=2)
 
-        # 5. 인접 청크로 컨텍스트 확장
-        filtered_results = await self._expand_with_adjacent_chunks(filtered_results)
+        # 7. 인접 청크로 컨텍스트 확장
+        results = await self._expand_with_adjacent_chunks(results)
 
-        context = self._format_context(filtered_results)
-        return {"context": context, "references": references, "results": filtered_results}
+        context = self._format_context(results)
+        return {"context": context, "references": references, "results": results}
+
+    async def _append_following_chunks(self, results: List[Dict], count: int = 2) -> List[Dict]:
+        """
+        결과가 적을 때 다음(오른쪽) 청크 내용을 현재 청크에 덧붙임 (문맥 보강)
+
+        각 청크의 next_chunk_id를 따라가며 count개 청크의 내용을 content에 추가
+        """
+        if not results:
+            return results
+
+        # 1. 모든 next_chunk_id 수집 (체인 따라가기 위해 일단 첫 번째만)
+        chunks_to_fetch = set()
+        for doc in results:
+            next_id = doc.get("metadata", {}).get("next_chunk_id")
+            if next_id:
+                chunks_to_fetch.add(next_id)
+
+        if not chunks_to_fetch:
+            return results
+
+        # 2. 첫 번째 다음 청크들 조회
+        fetched_chunks = await qdrant_service.get_chunks_by_ids(
+            self.invoke_id, list(chunks_to_fetch)
+        )
+
+        # 3. 두 번째 다음 청크들도 조회 (count=2인 경우)
+        if count >= 2:
+            second_level_ids = set()
+            for chunk in fetched_chunks.values():
+                next_next_id = chunk.metadata.get("next_chunk_id")
+                if next_next_id and next_next_id not in fetched_chunks:
+                    second_level_ids.add(next_next_id)
+
+            if second_level_ids:
+                second_chunks = await qdrant_service.get_chunks_by_ids(
+                    self.invoke_id, list(second_level_ids)
+                )
+                fetched_chunks.update(second_chunks)
+
+        logger.info(f"[Search] 다음 청크 {len(fetched_chunks)}개 조회 (문맥 보강)")
+
+        # 4. 각 결과의 content에 다음 청크 내용 덧붙이기
+        expanded_results = []
+        chunk_overlap = settings.CHUNK_OVERLAP
+
+        for doc in results:
+            content = doc.get("content", "")
+            next_id = doc.get("metadata", {}).get("next_chunk_id")
+
+            # 다음 청크들 내용 수집
+            appended_content = ""
+            for _ in range(count):
+                if next_id and next_id in fetched_chunks:
+                    next_chunk = fetched_chunks[next_id]
+                    # overlap 부분 제외 (앞부분이 현재 청크와 중복)
+                    next_content = next_chunk.content
+                    non_overlap = next_content[chunk_overlap:] if len(next_content) > chunk_overlap else next_content
+                    appended_content += "\n\n" + non_overlap
+                    next_id = next_chunk.metadata.get("next_chunk_id")
+                else:
+                    break
+
+            expanded_doc = doc.copy()
+            expanded_doc["content"] = content + appended_content
+            expanded_results.append(expanded_doc)
+
+        return expanded_results
 
     async def _expand_with_adjacent_chunks(self, results: List[Dict]) -> List[Dict]:
         """
@@ -189,7 +255,7 @@ class SearchTool:
                 prev_content = adjacent_chunks[prev_id].content
                 # overlap 부분 제외 (끝부분이 현재 청크와 중복)
                 non_overlap = prev_content[:-chunk_overlap] if len(prev_content) > chunk_overlap else ""
-                prev_context = non_overlap[-CONTEXT_EXPAND_SIZE:] if non_overlap else ""
+                prev_context = non_overlap[-settings.CONTEXT_EXPAND_SIZE:] if non_overlap else ""
 
             # 뒤 청크에서 추가 (overlap 제외 후 처음 1000자)
             next_context = ""
@@ -197,7 +263,7 @@ class SearchTool:
                 next_content = adjacent_chunks[next_id].content
                 # overlap 부분 제외 (앞부분이 현재 청크와 중복)
                 non_overlap = next_content[chunk_overlap:] if len(next_content) > chunk_overlap else ""
-                next_context = non_overlap[:CONTEXT_EXPAND_SIZE] if non_overlap else ""
+                next_context = non_overlap[:settings.CONTEXT_EXPAND_SIZE] if non_overlap else ""
 
             # 확장된 컨텐츠 생성
             expanded_content = ""

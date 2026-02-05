@@ -30,6 +30,7 @@ from app.core.config import settings
 from app.services.api_clients.model_server_client import model_server_client
 from app.services.api_clients.polaris_client import polaris_converter, PolarisJsonParser
 from app.services.rag.qdrant_service import qdrant_service
+from app.services.rag.sparse_encoder import sparse_encoder
 
 logger = logging.getLogger(__name__)
 
@@ -284,7 +285,7 @@ class RagIngestionService:
         on_progress=None,
     ) -> int:
         """
-        청크를 처리합니다 (임베딩 + 인덱싱).
+        청크를 처리합니다 (Dense + Sparse 임베딩 + 인덱싱).
 
         Args:
             chunks: 청크 리스트
@@ -300,10 +301,11 @@ class RagIngestionService:
         total_chunks = len(chunks)
         texts = [c["content"] for c in chunks]
 
-        logger.info(f"[Ingestion] 임베딩 요청: {total_chunks}개")
+        logger.info(f"[Ingestion] 임베딩 요청: {total_chunks}개 (Dense + Sparse)")
         if on_progress:
             await on_progress(40, f"임베딩 중... ({total_chunks}개)")
 
+        # Dense embedding (기존)
         all_embeddings = await model_server_client.embed_texts(texts, is_query=False)
 
         # 임베딩 개수 검증
@@ -312,14 +314,18 @@ class RagIngestionService:
                 f"Embedding count mismatch: expected {total_chunks}, got {len(all_embeddings)}"
             )
 
-        # 임베딩 결과 할당
-        for chunk, emb in zip(chunks, all_embeddings):
-            chunk["embedding"] = emb
+        # Sparse embedding (추가) - BM25 스타일
+        sparse_vectors = sparse_encoder.encode_batch(texts)
 
-        # Qdrant에 저장
+        # 임베딩 결과 할당
+        for chunk, emb, sparse in zip(chunks, all_embeddings, sparse_vectors):
+            chunk["embedding"] = emb
+            chunk["sparse"] = sparse
+
+        # Qdrant에 저장 (Hybrid vectors)
         indexed_count = await qdrant_service.upsert_documents(invoke_id, chunks)
 
-        logger.info(f"[Ingestion] {len(chunks)}개 처리 완료 (Qdrant: {indexed_count})")
+        logger.info(f"[Ingestion] {len(chunks)}개 처리 완료 (Hybrid, Qdrant: {indexed_count})")
         return indexed_count
 
     # ========================================

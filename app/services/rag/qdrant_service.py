@@ -48,17 +48,24 @@ class QdrantService:
         return self._client
 
     async def ensure_collection(self) -> None:
-        """컬렉션이 없으면 생성"""
+        """컬렉션이 없으면 생성 (Hybrid 지원: dense + sparse vectors)"""
         try:
             await self.client.get_collection(settings.QDRANT_COLLECTION)
             logger.info(f"[Qdrant] Collection '{settings.QDRANT_COLLECTION}' exists")
         except UnexpectedResponse:
             await self.client.create_collection(
                 collection_name=settings.QDRANT_COLLECTION,
-                vectors_config=models.VectorParams(
-                    size=settings.EMBEDDING_DIM,
-                    distance=models.Distance.COSINE,
-                ),
+                vectors_config={
+                    "dense": models.VectorParams(
+                        size=settings.EMBEDDING_DIM,
+                        distance=models.Distance.COSINE,
+                    )
+                },
+                sparse_vectors_config={
+                    "sparse": models.SparseVectorParams(
+                        modifier=models.Modifier.IDF,  # BM25 스타일
+                    )
+                },
             )
             # invoke_id 필드에 인덱스 생성 (필터 검색 성능 향상)
             await self.client.create_payload_index(
@@ -66,7 +73,7 @@ class QdrantService:
                 field_name="invoke_id",
                 field_schema=models.PayloadSchemaType.KEYWORD,
             )
-            logger.info(f"[Qdrant] Collection '{settings.QDRANT_COLLECTION}' created")
+            logger.info(f"[Qdrant] Collection '{settings.QDRANT_COLLECTION}' created (Hybrid)")
 
     async def upsert_documents(
         self,
@@ -74,11 +81,12 @@ class QdrantService:
         documents: List[Dict],
     ) -> int:
         """
-        문서 upsert (doc_id 기준으로 덮어쓰기)
+        문서 upsert (doc_id 기준으로 덮어쓰기, Hybrid vectors)
 
         Args:
             invoke_id: 룸/세션 ID
-            documents: [{"id": str, "content": str, "embedding": List[float], "metadata": dict}, ...]
+            documents: [{"id": str, "content": str, "embedding": List[float], "sparse": dict, "metadata": dict}, ...]
+                       sparse: {"indices": [int, ...], "values": [float, ...]}
 
         Returns:
             저장된 문서 수
@@ -93,9 +101,18 @@ class QdrantService:
             # point_id는 invoke_id + doc_id 조합으로 결정적 UUID 생성
             point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{invoke_id}:{doc['id']}"))
 
+            # Sparse vector 구성
+            sparse_data = doc.get("sparse", {"indices": [], "values": []})
+
             points.append(models.PointStruct(
                 id=point_id,
-                vector=doc["embedding"],
+                vector={
+                    "dense": doc["embedding"],
+                    "sparse": models.SparseVector(
+                        indices=sparse_data["indices"],
+                        values=sparse_data["values"],
+                    )
+                },
                 payload={
                     "invoke_id": invoke_id,
                     "doc_id": doc["id"],
@@ -113,7 +130,7 @@ class QdrantService:
             points=points,
         )
 
-        logger.info(f"[Qdrant] Upserted {len(points)} documents for invoke_id={invoke_id}")
+        logger.info(f"[Qdrant] Upserted {len(points)} documents (hybrid) for invoke_id={invoke_id}")
         return len(points)
 
     async def search(
@@ -121,14 +138,16 @@ class QdrantService:
         invoke_id: str,
         query_embedding: List[float],
         top_k: int = 30,
+        filter_source: Optional[str] = None,
     ) -> List[SearchResult]:
         """
-        벡터 검색 (invoke_id로 필터링)
+        벡터 검색 (invoke_id로 필터링) - Dense only (fallback용)
 
         Args:
             invoke_id: 룸/세션 ID
             query_embedding: 쿼리 임베딩 벡터
             top_k: 반환할 결과 수
+            filter_source: 특정 파일명으로 필터링 (Private chat용)
 
         Returns:
             SearchResult 리스트 (score 내림차순)
@@ -141,6 +160,15 @@ class QdrantService:
                     match=models.MatchValue(value=invoke_id),
                 )
             ]
+
+            # 파일명 필터 (Private chat)
+            if filter_source:
+                filter_conditions.append(
+                    models.FieldCondition(
+                        key="source",
+                        match=models.MatchValue(value=filter_source),
+                    )
+                )
 
             # 글로벌 문서: is_use=False만 제외 (True 또는 필드 없음은 통과)
             if invoke_id == settings.GLOBAL_INVOKE_ID:
@@ -158,6 +186,7 @@ class QdrantService:
             results = await self.client.query_points(
                 collection_name=settings.QDRANT_COLLECTION,
                 query=query_embedding,
+                using="dense",
                 query_filter=models.Filter(must=filter_conditions),
                 limit=top_k,
             )
@@ -179,6 +208,103 @@ class QdrantService:
         except UnexpectedResponse as e:
             logger.error(f"[Qdrant] Search failed: {e}")
             return []
+
+    async def search_hybrid(
+        self,
+        invoke_id: str,
+        dense_embedding: List[float],
+        sparse_vector: Dict[str, List],
+        top_k: int = 30,
+        filter_source: Optional[str] = None,
+    ) -> List[SearchResult]:
+        """
+        Hybrid 검색 (Dense + Sparse RRF Fusion)
+
+        Args:
+            invoke_id: 룸/세션 ID
+            dense_embedding: Dense 쿼리 임베딩 벡터
+            sparse_vector: Sparse 쿼리 벡터 {"indices": [...], "values": [...]}
+            top_k: 반환할 결과 수
+            filter_source: 특정 파일명으로 필터링 (Private chat용)
+
+        Returns:
+            SearchResult 리스트 (RRF score 내림차순)
+        """
+        try:
+            # 필터 조건 구성
+            filter_conditions = [
+                models.FieldCondition(
+                    key="invoke_id",
+                    match=models.MatchValue(value=invoke_id),
+                )
+            ]
+
+            # 파일명 필터 (Private chat)
+            if filter_source:
+                filter_conditions.append(
+                    models.FieldCondition(
+                        key="source",
+                        match=models.MatchValue(value=filter_source),
+                    )
+                )
+
+            # 글로벌 문서: is_use=False만 제외
+            if invoke_id == settings.GLOBAL_INVOKE_ID:
+                filter_conditions.append(
+                    models.Filter(
+                        must_not=[
+                            models.FieldCondition(
+                                key="is_use",
+                                match=models.MatchValue(value=False),
+                            )
+                        ]
+                    )
+                )
+
+            query_filter = models.Filter(must=filter_conditions)
+
+            # Hybrid Query with RRF Fusion
+            results = await self.client.query_points(
+                collection_name=settings.QDRANT_COLLECTION,
+                prefetch=[
+                    models.Prefetch(
+                        query=dense_embedding,
+                        using="dense",
+                        limit=top_k,
+                    ),
+                    models.Prefetch(
+                        query=models.SparseVector(
+                            indices=sparse_vector["indices"],
+                            values=sparse_vector["values"],
+                        ),
+                        using="sparse",
+                        limit=top_k,
+                    ),
+                ],
+                query=models.FusionQuery(fusion=models.Fusion.RRF),
+                query_filter=query_filter,
+                limit=top_k,
+            )
+
+            return [
+                SearchResult(
+                    doc_id=hit.payload.get("doc_id", ""),
+                    score=hit.score,
+                    content=hit.payload.get("content", ""),
+                    metadata={
+                        "source": hit.payload.get("source", ""),
+                        "page": hit.payload.get("page", 0),
+                        "prev_chunk_id": hit.payload.get("prev_chunk_id"),
+                        "next_chunk_id": hit.payload.get("next_chunk_id"),
+                    }
+                )
+                for hit in results.points
+            ]
+        except UnexpectedResponse as e:
+            logger.error(f"[Qdrant] Hybrid search failed: {e}")
+            # Fallback to dense-only search
+            logger.warning("[Qdrant] Falling back to dense-only search")
+            return await self.search(invoke_id, dense_embedding, top_k, filter_source)
 
     async def get_chunks_by_ids(
         self,

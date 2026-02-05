@@ -18,6 +18,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from app.core.config import settings
 from app.services.api_clients.model_server_client import model_server_client
 from app.services.rag.rag_ingestion_service import rag_ingestion_service
+from app.services.rag.sparse_encoder import sparse_encoder
 
 logger = logging.getLogger(__name__)
 
@@ -122,26 +123,31 @@ class AdminDocumentService:
             shutil.rmtree(admin_upload_dir, ignore_errors=True)
             return False
 
-        # 임베딩
+        # 임베딩 (dense + sparse)
         all_embeddings = []
+        all_sparse = []
         for i in range(0, len(chunks), self.EMBED_BATCH_SIZE):
             batch_chunks = chunks[i:i + self.EMBED_BATCH_SIZE]
             texts = [c["content"] for c in batch_chunks]
-            embeddings = await model_server_client.embed_texts(texts, is_query=False)
 
+            # Dense 임베딩
+            embeddings = await model_server_client.embed_texts(texts, is_query=False)
             if len(embeddings) != len(batch_chunks):
                 logger.error(f"[AdminDocument] Embedding count mismatch")
                 shutil.rmtree(admin_upload_dir, ignore_errors=True)
                 return False
-
             all_embeddings.extend(embeddings)
+
+            # Sparse 임베딩
+            sparse_vectors = sparse_encoder.encode_batch(texts)
+            all_sparse.extend(sparse_vectors)
 
         # Qdrant에 저장 (관리자 메타데이터 포함)
         regist_date = datetime.now(timezone.utc).isoformat()
         invoke_id = settings.GLOBAL_INVOKE_ID
 
         points = []
-        for chunk, emb in zip(chunks, all_embeddings):
+        for chunk, emb, sparse in zip(chunks, all_embeddings, all_sparse):
             point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{invoke_id}:{chunk['id']}"))
 
             payload = {
@@ -164,7 +170,13 @@ class AdminDocumentService:
 
             points.append(models.PointStruct(
                 id=point_id,
-                vector=emb,
+                vector={
+                    "dense": emb,
+                    "sparse": models.SparseVector(
+                        indices=sparse["indices"],
+                        values=sparse["values"],
+                    ),
+                },
                 payload=payload,
             ))
 

@@ -85,20 +85,14 @@ async def upload_document(
                 logger.debug(f"[SSE] Queueing progress: {percent}% - {message}")
                 await queue.put(create_sse_data({"type": SSEType.PROGRESS, "percent": percent, "message": message}))
 
-            # 마크다운 결과 콜백 (디버깅용, 100KB 제한)
+            # 마크다운 결과 콜백 (디버깅용)
             async def on_markdown(markdown_content: str):
                 logger.debug(f"[SSE] Queueing markdown preview: {len(markdown_content)} chars")
-                # SSE 청크 크기 제한 (100KB) - 너무 크면 truncate
-                max_size = 100_000
-                truncated = len(markdown_content) > max_size
-                content_to_send = markdown_content[:max_size] if truncated else markdown_content
-                if truncated:
-                    content_to_send += f"\n\n... (이하 {len(markdown_content) - max_size:,}자 생략)"
                 await queue.put(create_sse_data({
                     "type": SSEType.MARKDOWN_PREVIEW,
-                    "content": content_to_send,
+                    "content": markdown_content,
                     "length": len(markdown_content),
-                    "truncated": truncated
+                    "truncated": False
                 }))
 
             # 인덱싱 작업을 별도 태스크로 실행

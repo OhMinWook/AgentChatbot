@@ -3,7 +3,7 @@ import os
 
 class Settings(BaseModel):
     # 통합 Model Server URL (LLM + STT + Embedding)
-    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://213.173.111.112:44854")
+    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://213.173.111.112:21440")
     VLLM_MODEL: str = os.getenv("VLLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B-AWQ")
 
     # 운영에서 흔히 필요한 제한값들 (MVP 기본)
@@ -23,11 +23,12 @@ class Settings(BaseModel):
 
 
     # [검색 설정]
-    SEARCH_TOP_K: int = 4  # 검색 상위 개수
+    SEARCH_TOP_K: int = 6  # 검색 상위 개수
 
-    # [청크 설정]
-    CHUNK_SIZE: int = 2000
-    CHUNK_OVERLAP: int = 500
+    # [청크 설정] - 2025 연구 기반 최적화 (400-512 토큰 ≈ 800-1500자)
+    CHUNK_SIZE: int = 1000      # 2000 → 1000 (약 300-400 토큰)
+    CHUNK_OVERLAP: int = 200    # 250 → 200 (20%)
+    CONTEXT_EXPAND_SIZE: int = 800  # 인접 청크에서 가져올 추가 컨텍스트 크기
 
     # [Polaris 설정] Polaris 사용 여부 (False일 경우 pdf4llm/markitdown 등 대체재 사용)
     POLARIS_ENABLED: bool = False

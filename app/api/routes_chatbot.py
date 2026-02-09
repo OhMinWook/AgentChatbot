@@ -12,6 +12,7 @@ from app.services.utils.file_utils import save_upload_file
 from app.services.utils.sse_utils import create_sse_data, create_sse_response, SSEType
 from app.services.rag.rag_ingestion_service import rag_ingestion_service
 from app.services.chat_agent.sse_adapter import sse_graph_adapter
+from app.services.chat_agent.nodes import stream_llm_tokens
 from app.services.api_clients.llm_client import llm_client
 from app.services.prompt_builders.document_summary_prompt_builder import document_summary_prompt_builder
 from app.services.chat_agent.tools import create_search_tool
@@ -106,7 +107,7 @@ async def upload_document(
                         on_markdown=on_markdown
                     )
                     # 완료 이벤트
-                    await queue.put(create_sse_data({"type": SSEType.DONE, "message": "모든 인덱싱 작업이 완료되었습니다."}))
+                    await queue.put(create_sse_data({"type": SSEType.DONE, "message": "문서 등록이 완료되었습니다."}))
                 except Exception as e:
                     logger.error(f"[Upload Stream Error] {e}")
                     await queue.put(create_sse_data({"type": SSEType.ERROR, "detail": str(e)}))
@@ -288,12 +289,11 @@ async def summarize_document(
             if total_chunks >= LARGE_DOC_CHUNK_THRESHOLD:
                 # ===== 대용량 문서: 질문 분해 방식 =====
                 questions = document_summary_prompt_builder.get_questions()
-                question_count = len(questions)
 
                 yield create_sse_data({
                     "type": SSEType.PROGRESS,
                     "percent": 10,
-                    "message": f"대용량 문서 ({total_chunks}청크), 질문 분해 방식으로 분석"
+                    "message": "문서 내용을 분석하고 있습니다"
                 })
 
                 # 배치 검색 (Qdrant + Reranker)
@@ -312,7 +312,7 @@ async def summarize_document(
                 yield create_sse_data({
                     "type": SSEType.PROGRESS,
                     "percent": 40,
-                    "message": f"질문 {question_count}개 병렬 분석 중..."
+                    "message": "문서 내용을 정리하고 있습니다"
                 })
 
                 all_references = []
@@ -356,19 +356,32 @@ async def summarize_document(
                 yield create_sse_data({
                     "type": SSEType.PROGRESS,
                     "percent": 85,
-                    "message": "분석 결과 통합 중..."
+                    "message": "요약을 작성하고 있습니다"
                 })
 
                 merge_payload = document_summary_prompt_builder.build_merge_payload(qa_results, target_filename)
-                merge_response = await llm_client.chat_completions(merge_payload)
-                summary = llm_client.extract_content(merge_response)
+
+                # 레퍼런스 전송
+                if all_references:
+                    all_references.sort(key=lambda x: x.get("page", 0))
+                    yield create_sse_data({"type": SSEType.REFERENCES, "docs": all_references})
+
+                # 진짜 스트리밍
+                async for token in stream_llm_tokens(
+                    merge_payload["messages"],
+                    merge_payload.get("max_tokens", settings.DEFAULT_MAX_TOKENS)
+                ):
+                    yield create_sse_data({"type": SSEType.ANSWER, "content": token})
+
+                yield create_sse_data({"type": SSEType.DONE})
+                return
 
             else:
                 # ===== 소형 문서: 단순 검색 방식 =====
                 yield create_sse_data({
                     "type": SSEType.PROGRESS,
                     "percent": 20,
-                    "message": f"문서 검색 중 ({total_chunks}청크)..."
+                    "message": "문서 내용을 검색하고 있습니다"
                 })
 
                 # 단일 검색 (Qdrant + Reranker)
@@ -393,20 +406,20 @@ async def summarize_document(
                 })
 
                 payload = document_summary_prompt_builder.build_simple_summary_payload(context, target_filename)
-                response = await llm_client.chat_completions(payload)
-                summary = llm_client.extract_content(response)
 
-            # 레퍼런스 전송
-            if all_references:
-                all_references.sort(key=lambda x: x.get("page", 0))
-                yield create_sse_data({"type": SSEType.REFERENCES, "docs": all_references})
+                # 레퍼런스 전송
+                if all_references:
+                    all_references.sort(key=lambda x: x.get("page", 0))
+                    yield create_sse_data({"type": SSEType.REFERENCES, "docs": all_references})
 
-            # 답변 스트리밍
-            chunk_size = 6
-            for i in range(0, len(summary), chunk_size):
-                yield create_sse_data({"type": SSEType.ANSWER, "content": summary[i:i + chunk_size]})
+                # 진짜 스트리밍
+                async for token in stream_llm_tokens(
+                    payload["messages"],
+                    payload.get("max_tokens", settings.DEFAULT_MAX_TOKENS)
+                ):
+                    yield create_sse_data({"type": SSEType.ANSWER, "content": token})
 
-            yield create_sse_data({"type": SSEType.DONE})
+                yield create_sse_data({"type": SSEType.DONE})
 
         except Exception as e:
             logger.error(f"[Document Summary Error] {e}")

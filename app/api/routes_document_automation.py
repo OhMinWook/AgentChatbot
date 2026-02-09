@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Dict, Any, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Form
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -105,12 +105,13 @@ async def download_document(token: str):
     with open(file_path, "rb") as f:
         file_bytes = f.read()
 
-    # 1회용 링크면 파일 삭제
-    if is_one_time:
+    # 1회용 링크면 파일 삭제 (참조 파일은 삭제하지 않음)
+    is_reference = file_info.get("is_reference", False)
+    if is_one_time and not is_reference:
         download_service.delete_file(file_path)
 
     return StreamingResponse(
         content=iter([file_bytes]),
         media_type=media_type,
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
     )

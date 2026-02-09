@@ -326,6 +326,9 @@ async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 20
         "temperature": settings.DEFAULT_TEMPERATURE
     }
 
+    logger.info(f"[LLM Stream] 요청 시작 (max_tokens={max_tokens})")
+    token_count = 0
+
     try:
         stream = await llm_client.chat_completions_stream(payload)
         buffer = ""
@@ -339,15 +342,27 @@ async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 20
                     continue
                 data_str = line[5:].strip()
                 if data_str == "[DONE]":
+                    logger.info(f"[LLM Stream] 완료 (tokens={token_count})")
                     return
                 try:
                     data = json.loads(data_str)
-                    delta = data.get("choices", [{}])[0].get("delta", {})
+                    choice = data.get("choices", [{}])[0]
+                    delta = choice.get("delta", {})
                     token = delta.get("content")
+                    finish_reason = choice.get("finish_reason")
+
                     if token:
+                        token_count += 1
                         yield token
+
+                    # finish_reason 로깅 (stop: 정상종료, length: 토큰부족)
+                    if finish_reason:
+                        logger.info(f"[LLM Stream] finish_reason={finish_reason}, tokens={token_count}")
+                        if finish_reason == "length":
+                            logger.warning(f"[LLM Stream] 토큰 제한으로 응답 잘림! max_tokens={max_tokens}")
+
                 except json.JSONDecodeError:
                     continue
     except Exception as e:
-        logger.error(f"stream_llm_tokens error: {e}")
+        logger.error(f"[LLM Stream] error: {e}, tokens={token_count}")
         raise

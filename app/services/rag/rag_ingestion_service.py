@@ -104,8 +104,11 @@ class IncrementalChunker:
         if not text.strip():
             return []
 
+        # 기존 내용이 있으면 페이지 구분자 추가
+        if self.buffer:
+            self.buffer += "\n\n"
         start_idx = len(self.buffer)
-        self.buffer += text + "\n\n"
+        self.buffer += text
         end_idx = len(self.buffer)
         self.page_ranges.append((start_idx, end_idx, page_num))
         self.current_page = page_num
@@ -169,14 +172,16 @@ class IncrementalChunker:
     def flush(self) -> List[Dict]:
         """남은 버퍼를 청크로 변환"""
         chunks = []
+        remaining = self.buffer.strip()
 
-        if self.buffer.strip():
+        # 이전 청크에서 이미 포함된 overlap-only 잔여분은 스킵
+        if remaining and not (self.chunk_idx > 0 and len(remaining) <= self.chunk_overlap):
             page = self._get_page_for_position(0, len(self.buffer))
             chunk_id = f"{self.file_name}_p{page}_{self.chunk_idx}"
 
             chunks.append({
                 "id": chunk_id,
-                "content": self.buffer.strip(),
+                "content": remaining,
                 "metadata": {
                     "source": self.file_name,
                     "page": page
@@ -189,6 +194,8 @@ class IncrementalChunker:
 
 
 class RagIngestionService:
+    EMBED_BATCH_SIZE = 64  # 임베딩 배치 크기
+
     def __init__(self):
         self._markitdown = MarkItDown() if MarkItDown else None
 
@@ -297,25 +304,29 @@ class RagIngestionService:
         if not chunks:
             return 0
 
-        # 임베딩 요청 (vLLM이 자체 배칭/메모리 관리)
+        # 임베딩 요청 (배치 처리)
         total_chunks = len(chunks)
         texts = [c["content"] for c in chunks]
 
-        logger.info(f"[Ingestion] 임베딩 요청: {total_chunks}개 (Dense + Sparse)")
+        logger.info(f"[Ingestion] 임베딩 요청: {total_chunks}개 (Dense + Sparse, batch={self.EMBED_BATCH_SIZE})")
         if on_progress:
             await on_progress(40, f"임베딩 중... ({total_chunks}개)")
 
-        # Dense embedding (기존)
-        all_embeddings = await model_server_client.embed_texts(texts, is_query=False)
+        # Sparse embedding (CPU, 즉시 완료)
+        sparse_vectors = sparse_encoder.encode_batch(texts)
+
+        # Dense embedding (배치 순차 호출)
+        all_embeddings = []
+        for i in range(0, len(texts), self.EMBED_BATCH_SIZE):
+            batch_texts = texts[i:i + self.EMBED_BATCH_SIZE]
+            batch_embeddings = await model_server_client.embed_texts(batch_texts, is_query=False)
+            all_embeddings.extend(batch_embeddings)
 
         # 임베딩 개수 검증
         if len(all_embeddings) != total_chunks:
             raise ValueError(
                 f"Embedding count mismatch: expected {total_chunks}, got {len(all_embeddings)}"
             )
-
-        # Sparse embedding (추가) - BM25 스타일
-        sparse_vectors = sparse_encoder.encode_batch(texts)
 
         # 임베딩 결과 할당
         for chunk, emb, sparse in zip(chunks, all_embeddings, sparse_vectors):
@@ -335,6 +346,7 @@ class RagIngestionService:
     async def ingest_file(self, file_name: str, invoke_id: str, file_path: str, on_progress=None, on_markdown=None):
         """
         파일을 처리합니다 (청킹 → 임베딩 → 인덱싱).
+        모든 파일 타입에서 IncrementalChunker를 사용합니다.
         """
         logger.info(f"[Ingestion] 파일 처리 시작: {file_name} (Room: {invoke_id})")
 
@@ -345,132 +357,21 @@ class RagIngestionService:
         _, ext = os.path.splitext(display_name)
         ext_to_use = ext.lower().strip()
 
-        # PDF 경로 결정 (HWP는 먼저 PDF로 변환)
-        pdf_path = None
-        temp_pdf_dir = None
+        temp_output_dir = None
 
         try:
-            # === 1. 파일 타입별 전처리 ===
-            # HWP는 Polaris 설정과 무관하게 항상 Polaris로 처리
-            if ext_to_use in ['.hwp', '.hwpx']:
-                logger.info(f"[Ingestion] HWP 파일은 Polaris로 처리: {file_name}")
-                await self._ingest_file_legacy(file_name, invoke_id, file_path, on_progress, on_markdown)
-                return
+            # === 1. 텍스트 추출 (파일 타입별 분기) ===
+            use_polaris = settings.POLARIS_ENABLED or ext_to_use in ['.hwp', '.hwpx']
+            is_pdf = ext_to_use == '.pdf' and not use_polaris
+            page_results = None  # PDF용: [(page_num, text), ...]
+            markdown_content = None  # Polaris/MarkItDown용: 단일 문자열
 
-            if settings.POLARIS_ENABLED:
-                # Polaris 활성화 시 모든 문서를 Polaris로 처리
-                await self._ingest_file_legacy(file_name, invoke_id, file_path, on_progress, on_markdown)
-                return
-
-            if ext_to_use == '.pdf':
-                pdf_path = file_path
-
-            else:
-                # 기타 문서는 기존 방식 (MarkItDown 등)
-                await self._ingest_file_legacy(file_name, invoke_id, file_path, on_progress, on_markdown)
-                return
-
-            # === 2. PDF 처리 ===
-            if on_progress:
-                await on_progress(10, "페이지 파싱 중...")
-
-            chunker = IncrementalChunker(
-                file_name=display_name,
-                chunk_size=settings.CHUNK_SIZE,
-                chunk_overlap=settings.CHUNK_OVERLAP
-            )
-
-            all_chunks: List[Dict] = []
-            max_page = 0
-            markdown_preview_parts = []
-
-            # 페이지 단위로 청킹 (멀티프로세싱)
-            loop = asyncio.get_event_loop()
-            parse_start = time.time()
-            page_generator = await loop.run_in_executor(
-                get_pdf_process_pool(),
-                _parse_pdf_in_process,
-                pdf_path
-            )
-            parse_elapsed = time.time() - parse_start
-            total_pages = len(page_generator)
-            logger.info(f"[Ingestion] PDF 텍스트 추출 완료: {total_pages}페이지, {parse_elapsed:.2f}초")
-
-            for page_num, page_text in page_generator:
-                max_page = max(max_page, page_num)
-
-                # 마크다운 프리뷰 (처음 10페이지만)
-                if page_num <= 10:
-                    markdown_preview_parts.append(f"\n--- Page {page_num} ---\n{page_text}")
-
-                # 청킹
-                new_chunks = chunker.add_page(page_num, page_text)
-                all_chunks.extend(new_chunks)
-
-            # 남은 청크 처리
-            remaining = chunker.flush()
-            all_chunks.extend(remaining)
-
-            if on_progress:
-                await on_progress(30, f"{len(all_chunks)}개 청크 생성 완료")
-
-            # 마크다운 콜백 (처음 10페이지만)
-            if on_markdown and markdown_preview_parts:
-                preview = "\n".join(markdown_preview_parts)
-                if total_pages > 10:
-                    preview += f"\n\n... ({total_pages - 10}페이지 생략)"
-                await on_markdown(preview)
-
-            # prev/next 청크 ID 연결
-            for i, chunk in enumerate(all_chunks):
-                chunk["metadata"]["prev_chunk_id"] = all_chunks[i - 1]["id"] if i > 0 else None
-                chunk["metadata"]["next_chunk_id"] = all_chunks[i + 1]["id"] if i < len(all_chunks) - 1 else None
-
-            # 모든 청크 한 번에 처리
-            if all_chunks:
-                await self._process_batch(all_chunks, invoke_id, on_progress)
-
-            total_chunks = len(all_chunks)
-
-            # === 3. 완료 처리 ===
-            if total_chunks == 0:
-                logger.warning(f"[Ingestion] 텍스트 추출 실패 (스캔 문서?): {display_name}")
+            if use_polaris:
+                # HWP/HWPX 또는 Polaris 활성화 시
                 if on_progress:
-                    await on_progress(100, "텍스트 추출 실패 (스캔 문서일 수 있음)")
-                return
+                    await on_progress(5, "문서 내용 추출 중...")
 
-            logger.info(f"[Ingestion] 완료: {display_name} ({max_page}페이지, {total_chunks}청크)")
-
-            if on_progress:
-                await on_progress(100, "인덱싱 완료!")
-
-        finally:
-            # 임시 PDF 디렉토리 정리
-            if temp_pdf_dir and os.path.exists(temp_pdf_dir):
-                import shutil
-                shutil.rmtree(temp_pdf_dir, ignore_errors=True)
-
-    async def _ingest_file_legacy(self, file_name: str, invoke_id: str, file_path: str, on_progress=None, on_markdown=None):
-        """
-        기존 방식의 파일 처리 (Polaris, 기타 문서용).
-        전체 파일을 한 번에 처리합니다.
-        """
-        display_name = file_name
-        _, ext = os.path.splitext(display_name)
-        ext_to_use = ext.lower().strip()
-
-        markdown_content = ""
-
-        if on_progress:
-            await on_progress(5, "문서 내용 추출 중...")
-
-        # HWP는 Polaris 설정과 무관하게 항상 Polaris 사용
-        use_polaris = settings.POLARIS_ENABLED or ext_to_use in ['.hwp', '.hwpx']
-
-        if use_polaris:
-            temp_output_dir = tempfile.mkdtemp()
-            try:
-                # 멀티프로세싱으로 Polaris 변환
+                temp_output_dir = tempfile.mkdtemp()
                 loop = asyncio.get_event_loop()
                 parse_start = time.time()
                 markdown_content = await loop.run_in_executor(
@@ -484,104 +385,117 @@ class RagIngestionService:
                     logger.error("[Ingestion] Polaris 변환 실패")
                     return
                 logger.info(f"[Ingestion] Polaris 텍스트 추출 완료: {len(markdown_content)}자, {parse_elapsed:.2f}초")
-            except Exception as e:
-                logger.error(f"[Ingestion] Polaris 오류: {e}")
+
+            elif is_pdf:
+                # PDF: 멀티프로세싱으로 페이지별 추출
+                if on_progress:
+                    await on_progress(10, "페이지 파싱 중...")
+
+                loop = asyncio.get_event_loop()
+                parse_start = time.time()
+                page_results = await loop.run_in_executor(
+                    get_pdf_process_pool(),
+                    _parse_pdf_in_process,
+                    file_path
+                )
+                parse_elapsed = time.time() - parse_start
+                total_pages = len(page_results)
+                logger.info(f"[Ingestion] PDF 텍스트 추출 완료: {total_pages}페이지, {parse_elapsed:.2f}초")
+
+            else:
+                # 기타: MarkItDown
+                if on_progress:
+                    await on_progress(5, "문서 내용 추출 중...")
+
+                if self._markitdown is None:
+                    logger.error("[Ingestion] MarkItDown 미설치")
+                    return
+
+                try:
+                    parse_start = time.time()
+                    result = await asyncio.to_thread(self._markitdown.convert, file_path)
+                    parse_elapsed = time.time() - parse_start
+                    if result and result.text_content:
+                        markdown_content = result.text_content
+                        logger.info(f"[Ingestion] MarkItDown 텍스트 추출 완료: {len(markdown_content)}자, {parse_elapsed:.2f}초")
+                except Exception as e:
+                    logger.error(f"[Ingestion] MarkItDown 오류: {e}")
+                    return
+
+            # 추출 결과 검증
+            if not page_results and not markdown_content:
+                logger.warning(f"[Ingestion] 텍스트 추출 실패 (스캔 문서?): {display_name}")
+                if on_progress:
+                    await on_progress(100, "텍스트 추출 실패 (스캔 문서일 수 있음)")
                 return
-            finally:
-                # 임시 디렉토리 정리
+
+            # 마크다운 콜백
+            if on_markdown:
+                if markdown_content:
+                    await on_markdown(markdown_content)
+                elif page_results:
+                    preview_parts = [f"\n--- Page {pn} ---\n{pt}" for pn, pt in page_results if pn <= 10]
+                    preview = "\n".join(preview_parts)
+                    if len(page_results) > 10:
+                        preview += f"\n\n... ({len(page_results) - 10}페이지 생략)"
+                    await on_markdown(preview)
+
+            if on_progress:
+                await on_progress(20, "문서 파싱 완료")
+
+            # === 2. 청킹 (IncrementalChunker 통합) ===
+            chunker = IncrementalChunker(
+                file_name=display_name,
+                chunk_size=settings.CHUNK_SIZE,
+                chunk_overlap=settings.CHUNK_OVERLAP
+            )
+
+            all_chunks: List[Dict] = []
+            max_page = 0
+
+            if page_results:
+                # PDF: 페이지별로 추가
+                for page_num, page_text in page_results:
+                    max_page = max(max_page, page_num)
+                    new_chunks = chunker.add_page(page_num, page_text)
+                    all_chunks.extend(new_chunks)
+            else:
+                # Polaris/MarkItDown: 단일 페이지로 처리
+                max_page = 1
+                new_chunks = chunker.add_page(1, markdown_content)
+                all_chunks.extend(new_chunks)
+
+            # 남은 청크 처리
+            remaining = chunker.flush()
+            all_chunks.extend(remaining)
+
+            if on_progress:
+                await on_progress(30, f"{len(all_chunks)}개 청크 생성 완료")
+
+            if not all_chunks:
+                logger.warning(f"[Ingestion] 청크 생성 실패: {display_name}")
+                return
+
+            # === 3. 공통 후처리 ===
+            # prev/next 청크 ID 연결
+            for i, chunk in enumerate(all_chunks):
+                chunk["metadata"]["prev_chunk_id"] = all_chunks[i - 1]["id"] if i > 0 else None
+                chunk["metadata"]["next_chunk_id"] = all_chunks[i + 1]["id"] if i < len(all_chunks) - 1 else None
+
+            # 임베딩 + 인덱싱
+            await self._process_batch(all_chunks, invoke_id, on_progress)
+
+            total_chunks = len(all_chunks)
+            logger.info(f"[Ingestion] 완료: {display_name} ({max_page}페이지, {total_chunks}청크)")
+
+            if on_progress:
+                await on_progress(100, "인덱싱 완료!")
+
+        finally:
+            # 임시 디렉토리 정리
+            if temp_output_dir and os.path.exists(temp_output_dir):
                 import shutil
                 shutil.rmtree(temp_output_dir, ignore_errors=True)
-        else:
-            # MarkItDown 사용
-            if self._markitdown is None:
-                logger.error("[Ingestion] MarkItDown 미설치")
-                return
-
-            try:
-                parse_start = time.time()
-                result = await asyncio.to_thread(self._markitdown.convert, file_path)
-                parse_elapsed = time.time() - parse_start
-                if result and result.text_content:
-                    markdown_content = result.text_content
-                    logger.info(f"[Ingestion] MarkItDown 텍스트 추출 완료: {len(markdown_content)}자, {parse_elapsed:.2f}초")
-            except Exception as e:
-                logger.error(f"[Ingestion] MarkItDown 오류: {e}")
-                return
-
-        if not markdown_content:
-            logger.error("[Ingestion] 마크다운 없음")
-            return
-
-        if on_markdown:
-            await on_markdown(markdown_content)
-
-        if on_progress:
-            await on_progress(20, "문서 파싱 완료")
-
-        # 청킹
-        chunks = self._create_chunks_simple(markdown_content, display_name)
-
-        if not chunks:
-            logger.error("[Ingestion] 청크 생성 실패")
-            return
-
-        if on_progress:
-            await on_progress(40, f"{len(chunks)}개 청크 생성 완료")
-
-        # prev/next 청크 ID 연결
-        for i, chunk in enumerate(chunks):
-            chunk["metadata"]["prev_chunk_id"] = chunks[i - 1]["id"] if i > 0 else None
-            chunk["metadata"]["next_chunk_id"] = chunks[i + 1]["id"] if i < len(chunks) - 1 else None
-
-        # 모든 청크 한 번에 처리
-        total_chunks = len(chunks)
-        await self._process_batch(chunks, invoke_id, on_progress)
-
-        if on_progress:
-            await on_progress(100, "인덱싱 완료!")
-
-        logger.info(f"[Ingestion] 완료 (Legacy): {display_name} ({total_chunks}청크)")
-
-    def _create_chunks_simple(self, markdown_content: str, file_name: str) -> List[Dict]:
-        """단순 청킹 (기존 방식)"""
-        if not markdown_content.strip():
-            return []
-
-        chunk_size = settings.CHUNK_SIZE
-        chunk_overlap = settings.CHUNK_OVERLAP
-
-        chunks = []
-        start = 0
-        text_len = len(markdown_content)
-        chunk_idx = 0
-
-        while start < text_len:
-            end = min(start + chunk_size, text_len)
-            chunk_text = markdown_content[start:end]
-
-            if end < text_len:
-                last_period = chunk_text.rfind('.')
-                last_newline = chunk_text.rfind('\n')
-                cut_point = max(last_period, last_newline)
-                if cut_point > chunk_size * 0.7:
-                    chunk_text = chunk_text[:cut_point + 1]
-                    end = start + cut_point + 1
-
-            if chunk_text.strip():
-                chunk_id = f"{file_name}_p1_{chunk_idx}"
-                chunks.append({
-                    "id": chunk_id,
-                    "content": chunk_text.strip(),
-                    "metadata": {
-                        "source": file_name,
-                        "page": 1
-                    }
-                })
-                chunk_idx += 1
-
-            start = end - chunk_overlap if end < text_len else text_len
-
-        return chunks
 
 
 # 싱글톤 인스턴스

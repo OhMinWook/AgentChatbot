@@ -4,17 +4,20 @@ LangGraph 도구 정의
 문서 검색을 LangGraph 도구로 래핑
 """
 
+import asyncio
 import logging
+from html import escape as html_escape
 from typing import List, Dict, Any
 from app.services.api_clients.model_server_client import model_server_client
 from app.services.rag.qdrant_service import qdrant_service
 from app.services.rag.sparse_encoder import sparse_encoder
+from app.services.rag.text_utils import add_source_prefix
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 # Reranker 후보 수 (Qdrant에서 가져올 개수)
-RERANK_CANDIDATES = 30
+RERANK_CANDIDATES = 64
 
 
 class SearchTool:
@@ -63,7 +66,10 @@ class SearchTool:
             return {"context": None, "references": [], "results": []}
 
         # 3. Reranking (인접 청크 필터링을 위해 더 많이 가져옴)
-        documents = [c.content for c in candidates]
+        documents = [
+            add_source_prefix(c.content, c.metadata.get("source", ""))
+            for c in candidates
+        ]
         reranked = await model_server_client.rerank(
             query=query,
             documents=documents,
@@ -81,9 +87,9 @@ class SearchTool:
             if len(results) >= k:
                 break
 
-            # 점수 필터링 (최소 2개 보장, 이후 0.55 미만 제외)
+            # 점수 필터링 (최소 2개 보장, 이후 임계값 미만 제외)
             score = r.get("score", 0.0)
-            if len(results) >= 2 and score < 0.55:
+            if len(results) >= 2 and score < settings.RERANK_SCORE_THRESHOLD:
                 logger.debug(f"[Search] 낮은 점수 스킵: {score:.3f}")
                 continue
 
@@ -299,7 +305,10 @@ class SearchTool:
                 continue
             seen_contents.add(content_key)
 
-            formatted_doc = f'<document source="{source}" page="{page}">\n{content}\n</document>'
+            # XML 특수문자 이스케이프
+            escaped_content = html_escape(content, quote=False)
+            escaped_source = html_escape(str(source), quote=True)
+            formatted_doc = f'<document source="{escaped_source}" page="{page}">\n{escaped_content}\n</document>'
             valid_docs.append(formatted_doc)
 
         if not valid_docs:
@@ -309,7 +318,7 @@ class SearchTool:
 
     async def search_batch(self, queries: List[str], top_k: int = None, filter_filename: str = None) -> List[Dict[str, Any]]:
         """
-        여러 쿼리 배치 검색 (각 쿼리별로 search 호출)
+        여러 쿼리 배치 검색 (병렬 처리)
 
         Returns:
             [
@@ -319,13 +328,13 @@ class SearchTool:
         """
         logger.info(f"[Batch Search] {len(queries)}개 쿼리, invoke_id: {self.invoke_id}, filter: {filter_filename}")
 
-        all_search_results = []
-        for query in queries:
+        async def search_with_query(query: str) -> Dict[str, Any]:
             result = await self.search(query, top_k, filter_filename)
             result["query"] = query
-            all_search_results.append(result)
+            return result
 
-        return all_search_results
+        all_search_results = await asyncio.gather(*[search_with_query(q) for q in queries])
+        return list(all_search_results)
 
 
 def create_search_tool(invoke_id: str) -> SearchTool:

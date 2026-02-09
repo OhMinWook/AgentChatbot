@@ -1,27 +1,30 @@
 # 1. Core Framework
-fastapi
-uvicorn[standard]
-pydantic
-python-multipart       # 파일 업로드(Form/File) 필수
+fastapi==0.128.0
+uvicorn[standard]==0.40.0
+pydantic==2.12.5
+python-multipart==0.0.22       # 파일 업로드(Form/File) 필수
 
 # 2. Networking & HTTP
-httpx                  # LLM/STT/Model 서버 통신
+httpx==0.28.1                  # LLM/STT/Model 서버 통신
 
 # 3. Database
-redis                  # 대화 히스토리
-qdrant-client          # 벡터 DB (문서 임베딩 저장/검색)
+redis==7.1.0                   # 대화 히스토리
+qdrant-client==1.16.2          # 벡터 DB (문서 임베딩 저장/검색)
 
 # 4. LangChain / LangGraph
-langchain-core         # 메시지, 프롬프트, 문서 타입
-langgraph              # LangGraph 에이전트 워크플로우
+langchain-core==1.2.7          # 메시지, 프롬프트, 문서 타입
+langgraph==1.0.6               # LangGraph 에이전트 워크플로우
 
 # 5. Document Processing
-jinja2                 # HWPX 문서 템플릿 처리
-markitdown             # Office/텍스트 파일 → 마크다운 변환
-pdf4llm                # PDF → 마크다운 변환 (페이지 단위)
+jinja2==3.1.6                  # HWPX 문서 템플릿 처리
+markitdown[all]==0.1.4         # Office/텍스트 파일 → 마크다운 변환 (docx, pptx, xlsx 등)
+pdf4llm==0.2.9                 # PDF → 마크다운 변환 (페이지 단위)
 
-# 6. Tokenizer
-tiktoken               # 토큰 수 측정 (긴 텍스트 청크 분할용)
+# 6. Audio Processing
+pydub==1.25.1                  # 오디오 파일 처리 (STT 전처리)
 
-# 7. Type Hints
-typing_extensions      # TypedDict 등 확장 타입
+# 7. Tokenizer
+tiktoken==0.12.0               # 토큰 수 측정 (긴 텍스트 청크 분할용)
+
+# 8. Type Hints
+typing_extensions==4.15.0      # TypedDict 등 확장 타입

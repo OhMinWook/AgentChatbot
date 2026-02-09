@@ -66,7 +66,7 @@ async def summarize_call(
             yield _progress(10, SummaryStage.RECEIVING, f"파일 저장 완료: {audio.filename or 'audio.wav'}")
 
             # ========== 2. STT 처리 (10% → 50%) ==========
-            yield _progress(15, SummaryStage.STT_START, "음성 인식 서버에 요청 중...")
+            yield _progress(15, SummaryStage.STT_START, "음성을 분석하고 있습니다")
             yield _progress(25, SummaryStage.STT_PROCESSING, "음성을 텍스트로 변환 중...")
 
             transcript = await stt_client.transcribe(saved_path)
@@ -74,23 +74,23 @@ async def summarize_call(
             if not transcript:
                 raise ValueError("STT 결과가 비어있습니다. 오디오 파일을 확인해주세요.")
 
-            yield _progress(50, SummaryStage.STT_COMPLETE, f"음성 인식 완료 (텍스트 길이: {len(transcript)}자)")
+            yield _progress(50, SummaryStage.STT_COMPLETE, "음성 인식 완료")
 
             # ========== 3. LLM 요약 (50% → 95%) ==========
-            yield _progress(55, SummaryStage.SUMMARY_START, "LLM 요약 요청 중...")
+            yield _progress(55, SummaryStage.SUMMARY_START, "요약을 생성하고 있습니다")
 
             if callsummary_prompt_builder.needs_chunking(transcript):
                 chunks = callsummary_prompt_builder.split_into_chunks(transcript)
                 total_chunks = len(chunks)
 
-                yield _progress(60, SummaryStage.SUMMARY_PROCESSING, f"긴 통화록 감지, {total_chunks}개 구간으로 분할 처리 중...")
+                yield _progress(60, SummaryStage.SUMMARY_PROCESSING, "긴 통화 내용을 나누어 분석하고 있습니다")
 
                 previous_summary = None
                 chunk_summaries = []
 
                 for i, chunk in enumerate(chunks):
                     progress = 60 + int((i + 1) / total_chunks * 30)
-                    yield _progress(progress, SummaryStage.SUMMARY_PROCESSING, f"구간 {i + 1}/{total_chunks} 요약 중...")
+                    yield _progress(progress, SummaryStage.SUMMARY_PROCESSING, "통화 내용을 요약하고 있습니다")
 
                     chunk_payload = callsummary_prompt_builder.build_chunk_payload(
                         chunk, i, total_chunks, previous_summary
@@ -99,14 +99,14 @@ async def summarize_call(
                     previous_summary = llm_client.extract_content(chunk_response)
                     chunk_summaries.append(previous_summary)
 
-                yield _progress(92, SummaryStage.SUMMARY_PROCESSING, "구간별 요약 통합 중...")
+                yield _progress(92, SummaryStage.SUMMARY_PROCESSING, "요약을 정리하고 있습니다")
 
                 combined = "\n\n---\n\n".join(chunk_summaries)
                 final_payload = callsummary_prompt_builder.build_final_summary_payload(combined)
                 final_response = await llm_client.chat_completions(final_payload)
                 summary = llm_client.extract_content(final_response)
             else:
-                yield _progress(70, SummaryStage.SUMMARY_PROCESSING, "통화 내용 분석 및 요약 생성 중...")
+                yield _progress(70, SummaryStage.SUMMARY_PROCESSING, "통화 내용을 요약하고 있습니다")
 
                 llm_payload = callsummary_prompt_builder.build_summary_payload(transcript)
                 llm_response = await llm_client.chat_completions(llm_payload)
@@ -117,7 +117,7 @@ async def summarize_call(
             # ========== 4. 완료 (100%) ==========
             duration = time.time() - start_time
 
-            yield _progress(100, SummaryStage.COMPLETE, f"처리 완료 (소요시간: {duration:.1f}초)")
+            yield _progress(100, SummaryStage.COMPLETE, "처리 완료")
 
             # 최종 결과 전송
             yield create_sse_data({

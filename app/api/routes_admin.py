@@ -115,16 +115,21 @@ async def delete_document(key: str):
 async def get_documents(
     page: int = 1,
     size: int = 10,
+    orderType: str = "registDate",
+    order: str = "desc",
 ):
     """
     문서 목록 조회 (페이지네이션)
 
-    - 등록일 기준 내림차순 정렬
+    - orderType: fileName (문서명) | registDate (등록일)
+    - order: desc (내림차순) | asc (오름차순)
     """
     try:
         docs, total_count = await admin_document_service.get_document_list(
             page=page,
             size=size,
+            order_type=orderType,
+            order=order,
         )
 
         items = [
@@ -164,12 +169,16 @@ async def search_documents(
     searchTerm: str = "",
     page: int = 1,
     size: int = 10,
+    orderType: str = "registDate",
+    order: str = "desc",
 ):
     """
     문서 검색
 
     - searchType: fileName, adminId, adminName
     - searchTerm: 검색어 (부분 일치)
+    - orderType: fileName (문서명) | registDate (등록일)
+    - order: desc (내림차순) | asc (오름차순)
     """
     try:
         docs, total_count = await admin_document_service.search_documents(
@@ -177,6 +186,8 @@ async def search_documents(
             search_term=searchTerm,
             page=page,
             size=size,
+            order_type=orderType,
+            order=order,
         )
 
         items = [

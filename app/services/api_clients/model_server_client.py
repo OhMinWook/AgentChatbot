@@ -3,7 +3,6 @@
 
 - 텍스트 임베딩
 - Reranking
-- 키워드 추출
 """
 
 import asyncio
@@ -75,7 +74,6 @@ class ModelServerClient:
 
     - 텍스트 임베딩
     - Reranking
-    - 키워드 추출
     """
     def __init__(self):
         self.base_url = settings.MODEL_SERVER_URL
@@ -169,48 +167,6 @@ class ModelServerClient:
         except httpx.RequestError as e:
             logger.error(f"Model Server Connection Error (Rerank): {e}")
             raise
-
-    # ========================================
-    # 키워드 추출 API
-    # ========================================
-
-    async def extract_keywords_batch(self, texts: List[str]) -> List[str]:
-        """
-        텍스트 배치에서 키워드 추출
-        """
-        if not texts:
-            return []
-
-        url = f"{self.base_url}/extract_keywords"
-        payload = {"texts": texts}
-
-        try:
-            response = await _request_with_retry(
-                self.async_client, "POST", url,
-                json=payload, headers=self.headers,
-                timeout=settings.MODEL_SERVER_KEYWORD_TIMEOUT
-            )
-            return response.json()["keywords"]
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Model Server Error (Keyword Extraction): {e.response.text}")
-            raise
-        except (httpx.RequestError, KeyError) as e:
-            logger.error(f"Model Server Connection Error (Keyword Extraction): {e}")
-            raise
-
-    # ========================================
-    # 헬스 체크
-    # ========================================
-
-    async def health_check(self) -> Dict:
-        """모델 서버 상태 확인"""
-        url = f"{self.base_url}/health"
-        try:
-            response = await self.async_client.get(url, timeout=settings.MODEL_SERVER_HEALTH_TIMEOUT)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            return {"status": "error", "detail": str(e)}
 
 
 # 싱글톤

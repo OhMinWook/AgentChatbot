@@ -295,11 +295,15 @@ class QdrantService:
             if sparse_results.points:
                 scores = [p.score for p in sparse_results.points]
                 min_s, max_s = min(scores), max(scores)
-                range_s = max_s - min_s if max_s > min_s else 1.0
-                sparse_scores = {
-                    p.id: (p.score - min_s) / range_s
-                    for p in sparse_results.points
-                }
+                range_s = max_s - min_s
+                if range_s == 0:
+                    # 결과가 1개이거나 모든 점수가 동일한 경우
+                    sparse_scores = {p.id: 1.0 if p.score > 0 else 0.0 for p in sparse_results.points}
+                else:
+                    sparse_scores = {
+                        p.id: (p.score - min_s) / range_s
+                        for p in sparse_results.points
+                    }
 
             # 4. 가중 합계
             all_ids = set(dense_scores.keys()) | set(sparse_scores.keys())
@@ -445,6 +449,61 @@ class QdrantService:
         except UnexpectedResponse as e:
             logger.error(f"[Qdrant] Delete by source failed: {e}")
             return 0
+
+    async def get_document_metadata_by_source(
+        self,
+        invoke_id: str,
+        sources: List[str],
+    ) -> Dict[str, Dict]:
+        """
+        source 파일명으로 문서 메타데이터 조회
+
+        Args:
+            invoke_id: 룸/세션 ID
+            sources: 조회할 source 파일명 리스트
+
+        Returns:
+            {source: {"key": str|None, "invoke_id": str}} 딕셔너리
+            - key가 있으면 Admin 문서, 없으면 일반 문서
+        """
+        if not sources:
+            return {}
+
+        try:
+            # source 필터로 조회
+            results, _ = await self.client.scroll(
+                collection_name=settings.QDRANT_COLLECTION,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="invoke_id",
+                            match=models.MatchAny(any=[invoke_id, settings.GLOBAL_INVOKE_ID]),
+                        ),
+                        models.FieldCondition(
+                            key="source",
+                            match=models.MatchAny(any=sources),
+                        ),
+                    ]
+                ),
+                limit=len(sources) * 10,  # 각 source당 여러 청크가 있을 수 있음
+                with_payload=["source", "key", "invoke_id"],
+                with_vectors=False,
+            )
+
+            # source별 메타데이터 그룹화 (첫 번째 결과만 사용)
+            metadata_map: Dict[str, Dict] = {}
+            for point in results:
+                source = point.payload.get("source", "")
+                if source and source not in metadata_map:
+                    metadata_map[source] = {
+                        "key": point.payload.get("key"),  # Admin 문서면 key 있음
+                        "invoke_id": point.payload.get("invoke_id", ""),
+                    }
+
+            return metadata_map
+        except UnexpectedResponse as e:
+            logger.error(f"[Qdrant] Get document metadata failed: {e}")
+            return {}
 
     async def get_document_list(self, invoke_id: str) -> List[Dict]:
         """invoke_id에 해당하는 문서 목록 (source별 그룹화)"""

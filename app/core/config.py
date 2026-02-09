@@ -3,11 +3,10 @@ import os
 
 class Settings(BaseModel):
     # 통합 Model Server URL (LLM + STT + Embedding)
-    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://213.173.111.112:21440")
+    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://213.173.111.112:42709")
     VLLM_MODEL: str = os.getenv("VLLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B-AWQ")
 
-    # 운영에서 흔히 필요한 제한값들 (MVP 기본)
-    MAX_INPUT_CHARS: int = int(os.getenv("MAX_INPUT_CHARS", "20000"))
+    # LLM 기본 설정
     DEFAULT_MAX_TOKENS: int = int(os.getenv("DEFAULT_MAX_TOKENS", "4096"))
     DEFAULT_TEMPERATURE: float = float(os.getenv("DEFAULT_TEMPERATURE", "0"))
 
@@ -26,9 +25,12 @@ class Settings(BaseModel):
     SEARCH_TOP_K: int = 6  # 검색 상위 개수
 
     # [청크 설정] - 2025 연구 기반 최적화 (400-512 토큰 ≈ 800-1500자)
-    CHUNK_SIZE: int = 1000      # 2000 → 1000 (약 300-400 토큰)
+    CHUNK_SIZE: int = 1000      # 1000 (약 300-400 토큰)
     CHUNK_OVERLAP: int = 200    # 250 → 200 (20%)
     CONTEXT_EXPAND_SIZE: int = 800  # 인접 청크에서 가져올 추가 컨텍스트 크기
+
+    # [Rerank 설정]
+    RERANK_SCORE_THRESHOLD: float = float(os.getenv("RERANK_SCORE_THRESHOLD", "0.55"))
 
     # [Polaris 설정] Polaris 사용 여부 (False일 경우 pdf4llm/markitdown 등 대체재 사용)
     POLARIS_ENABLED: bool = False
@@ -42,15 +44,10 @@ class Settings(BaseModel):
     # [글로벌 문서 설정] 관리자가 올린 공용 문서의 invoke_id
     GLOBAL_INVOKE_ID: str = os.getenv("GLOBAL_INVOKE_ID", "__global__")
 
-    # [키워드 추출 서버 설정] 4B LLM 서버 (없으면 MODEL_SERVER_URL 사용)
-    KEYWORD_SERVER_URL: str = os.getenv("KEYWORD_SERVER_URL", "")
-
     # [타임아웃 설정] 각 클라이언트 요청 타임아웃 (초)
     LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "180"))
     STT_TIMEOUT: float = float(os.getenv("STT_TIMEOUT", "300"))
     MODEL_SERVER_EMBED_TIMEOUT: float = float(os.getenv("MODEL_SERVER_EMBED_TIMEOUT", "600"))  # 문서 임베딩 (대량)
     MODEL_SERVER_QUERY_TIMEOUT: float = float(os.getenv("MODEL_SERVER_QUERY_TIMEOUT", "30"))  # 쿼리 임베딩 (소량)
-    MODEL_SERVER_KEYWORD_TIMEOUT: float = float(os.getenv("MODEL_SERVER_KEYWORD_TIMEOUT", "120"))
-    MODEL_SERVER_HEALTH_TIMEOUT: float = float(os.getenv("MODEL_SERVER_HEALTH_TIMEOUT", "10"))
 
 settings = Settings()

@@ -17,8 +17,9 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.core.config import settings
 from app.services.api_clients.model_server_client import model_server_client
-from app.services.rag.rag_ingestion_service import rag_ingestion_service
+from app.services.rag.rag_ingestion_service import rag_ingestion_service, IncrementalChunker
 from app.services.rag.sparse_encoder import sparse_encoder
+from app.services.rag.text_utils import add_source_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 class AdminDocumentService:
     """관리자 문서 관리 전용 서비스"""
 
-    EMBED_BATCH_SIZE = 40
+    EMBED_BATCH_SIZE = 64
 
     def __init__(self):
         self._client: Optional[AsyncQdrantClient] = None
@@ -123,24 +124,26 @@ class AdminDocumentService:
             shutil.rmtree(admin_upload_dir, ignore_errors=True)
             return False
 
-        # 임베딩 (dense + sparse)
+        # 임베딩 (dense + sparse, 병렬 처리)
+        all_texts = [
+            add_source_prefix(c["content"], c.get("metadata", {}).get("source", ""))
+            for c in chunks
+        ]
+
+        # Sparse 임베딩 (CPU, 즉시 완료)
+        all_sparse = sparse_encoder.encode_batch(all_texts)
+
+        # Dense 임베딩 (배치 순차 호출)
         all_embeddings = []
-        all_sparse = []
-        for i in range(0, len(chunks), self.EMBED_BATCH_SIZE):
-            batch_chunks = chunks[i:i + self.EMBED_BATCH_SIZE]
-            texts = [c["content"] for c in batch_chunks]
+        for i in range(0, len(all_texts), self.EMBED_BATCH_SIZE):
+            batch_texts = all_texts[i:i + self.EMBED_BATCH_SIZE]
+            batch_embeddings = await model_server_client.embed_texts(batch_texts, is_query=False)
+            all_embeddings.extend(batch_embeddings)
 
-            # Dense 임베딩
-            embeddings = await model_server_client.embed_texts(texts, is_query=False)
-            if len(embeddings) != len(batch_chunks):
-                logger.error(f"[AdminDocument] Embedding count mismatch")
-                shutil.rmtree(admin_upload_dir, ignore_errors=True)
-                return False
-            all_embeddings.extend(embeddings)
-
-            # Sparse 임베딩
-            sparse_vectors = sparse_encoder.encode_batch(texts)
-            all_sparse.extend(sparse_vectors)
+        if len(all_embeddings) != len(chunks):
+            logger.error(f"[AdminDocument] Embedding count mismatch: expected {len(chunks)}, got {len(all_embeddings)}")
+            shutil.rmtree(admin_upload_dir, ignore_errors=True)
+            return False
 
         # Qdrant에 저장 (관리자 메타데이터 포함)
         regist_date = datetime.now(timezone.utc).isoformat()
@@ -257,9 +260,13 @@ class AdminDocumentService:
                         rag_ingestion_service._markitdown.convert, file_path
                     )
                     if result and result.text_content:
-                        chunks = rag_ingestion_service._create_chunks_simple(
-                            result.text_content, file_name
+                        chunker = IncrementalChunker(
+                            file_name=file_name,
+                            chunk_size=settings.CHUNK_SIZE,
+                            chunk_overlap=settings.CHUNK_OVERLAP,
                         )
+                        chunks = chunker.add_page(1, result.text_content)
+                        chunks.extend(chunker.flush())
                 except Exception as e:
                     logger.error(f"[AdminDocument] MarkItDown error: {e}")
 
@@ -313,7 +320,10 @@ class AdminDocumentService:
             key_hash = hashlib.md5(key.encode()).hexdigest()[:16]
             admin_upload_dir = os.path.join(settings.UPLOAD_DIR, "admin", key_hash)
             if os.path.exists(admin_upload_dir):
-                shutil.rmtree(admin_upload_dir, ignore_errors=True)
+                try:
+                    shutil.rmtree(admin_upload_dir)
+                except OSError as e:
+                    logger.warning(f"[AdminDocument] Failed to delete upload dir {admin_upload_dir}: {e}")
 
             logger.info(f"[AdminDocument] Deleted document: key={key}")
             return True
@@ -325,9 +335,17 @@ class AdminDocumentService:
         self,
         page: int = 1,
         size: int = 10,
+        order_type: str = "registDate",
+        order: str = "desc",
     ) -> Tuple[List[Dict], int]:
         """
         문서 목록 조회 (페이지네이션)
+
+        Args:
+            page: 페이지 번호
+            size: 페이지 크기
+            order_type: 정렬 기준 (fileName, registDate)
+            order: 정렬 방향 (asc, desc)
 
         Returns:
             (문서 목록, 총 개수)
@@ -338,8 +356,14 @@ class AdminDocumentService:
 
             total_count = len(all_docs)
 
-            # 등록일 기준 내림차순 정렬
-            all_docs.sort(key=lambda x: x.get("regist_date", ""), reverse=True)
+            # 정렬
+            sort_field_map = {
+                "fileName": "file_name",
+                "registDate": "regist_date",
+            }
+            sort_key = sort_field_map.get(order_type, "regist_date")
+            is_descending = (order == "desc")
+            all_docs.sort(key=lambda x: x.get(sort_key, ""), reverse=is_descending)
 
             # 페이지네이션 적용
             start_idx = (page - 1) * size
@@ -409,6 +433,8 @@ class AdminDocumentService:
         search_term: str,
         page: int = 1,
         size: int = 10,
+        order_type: str = "registDate",
+        order: str = "desc",
     ) -> Tuple[List[Dict], int]:
         """
         문서 검색
@@ -418,6 +444,8 @@ class AdminDocumentService:
             search_term: 검색어
             page: 페이지 번호
             size: 페이지 크기
+            order_type: 정렬 기준 (fileName, registDate)
+            order: 정렬 방향 (asc, desc)
 
         Returns:
             (검색 결과, 총 개수)
@@ -442,8 +470,14 @@ class AdminDocumentService:
 
             total_count = len(all_docs)
 
-            # 정렬 및 페이지네이션
-            all_docs.sort(key=lambda x: x.get("regist_date", ""), reverse=True)
+            # 정렬
+            sort_field_map = {
+                "fileName": "file_name",
+                "registDate": "regist_date",
+            }
+            sort_key = sort_field_map.get(order_type, "regist_date")
+            is_descending = (order == "desc")
+            all_docs.sort(key=lambda x: x.get(sort_key, ""), reverse=is_descending)
 
             start_idx = (page - 1) * size
             end_idx = start_idx + size

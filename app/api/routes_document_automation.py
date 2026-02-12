@@ -15,7 +15,7 @@ router = APIRouter()
 
 @router.post("/documents/generate-hwpx", summary="HWPX 문서 자동 생성")
 async def generate_hwpx_document_api(
-        template_name: str = Form(..., description="사용할 HWPX 템플릿 파일명 (예: 'template.hwpx' 또는 'template2.hwpx')"),
+        template_name: str = Form(..., description="사용할 HWPX 템플릿 파일명: 'template.hwpx', 'template2.hwpx', 'template3.hwpx'"),
         context_data_str: str = Form(..., description="문서에 채워 넣을 JSON 데이터 (문자열 형태)", alias="context_data"),
         expires_in: int = Form(3600, description="다운로드 링크 만료 시간 (초 단위, 기본 1시간)"),
         one_time: bool = Form(True, description="1회용 링크 여부 (기본 True)")
@@ -24,12 +24,74 @@ async def generate_hwpx_document_api(
     제공된 HWPX 템플릿과 JSON 데이터를 사용하여 새로운 HWPX 문서를 생성하고,
     1회용/기간제 다운로드 링크를 반환합니다.
 
-    - **template_name**: 서버의 `app/templates/documents/` 폴더에 있는 HWPX 템플릿 파일명 (예: 'template.hwpx')
-    - **context_data**: 문서의 플레이스홀더를 채울 JSON 형식의 데이터.
+    - **template_name**: 사용할 HWPX 템플릿 파일명
+    - **context_data**: 문서의 플레이스홀더를 채울 JSON 형식의 데이터 (템플릿별 구조는 아래 참조)
     - **expires_in**: 다운로드 링크 만료 시간 (초 단위, 기본 3600초 = 1시간)
     - **one_time**: True면 1회 다운로드 후 링크 무효화
 
-    **반환값**: {"download_url": str, "expires_at": str, "one_time": bool}
+    ---
+
+    ### 지원 템플릿 및 context_data 구조
+
+    #### 1. `template.hwpx` (기안문/시행문)
+    ```json
+    {
+      "doc_number": "문서번호",
+      "draft_date": "기안일",
+      "exec_date": "시행일",
+      "via": "경유",
+      "recipient": "수신",
+      "reference": "참조",
+      "title": "제목",
+      "retention": "보존기한",
+      "sign_manager": "관리자 서명",
+      "sign_drafter": "기안자 서명",
+      "sign_coop": "협조자 서명",
+      "doc_number_2": "시행문 문서번호",
+      "exec_date_2": "시행문 시행일",
+      "via_2": "시행문 경유",
+      "recipient_2": "시행문 수신",
+      "reference_2": "시행문 참조",
+      "title_2": "시행문 제목",
+      "has_attachment": false,
+      "items": [
+        {"text": "본문 내용", "level": 1}
+      ]
+    }
+    ```
+
+    #### 2. `template2.hwpx` (일반 공문)
+    ```json
+    {
+      "recipient": "수신",
+      "via": "경유",
+      "title": "제목",
+      "attachment": "붙임",
+      "content_lines": ["본문 1줄", "본문 2줄"]
+    }
+    ```
+
+    #### 3. `template3.hwpx` (회의록)
+    ```json
+    {
+      "meeting_title": "회의 안건",
+      "datetime": "일시",
+      "person_in_charge": "담당자",
+      "location": "장소",
+      "attendee_count": "참석 인원수",
+      "agenda": "주요 안건",
+      "attendees": [
+        {"affiliation": "소속", "name": "이름"}
+      ],
+      "meeting_content_lines": ["회의 내용 1줄", "회의 내용 2줄"],
+      "meeting_result_lines": ["회의 결과 1줄", "회의 결과 2줄"]
+    }
+    ```
+    *attendees는 최대 8명까지 지원
+
+    ---
+
+    **반환값**: {"success": bool, "download_url": str, "expires_at": str, "one_time": bool, "filename": str}
     """
     try:
         # 문자열로 받은 context_data를 JSON(딕셔너리)으로 파싱

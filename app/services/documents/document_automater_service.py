@@ -3,6 +3,7 @@ from typing import Dict, Any
 
 from .processors.template1_processor import Template1Processor
 from .processors.template2_processor import Template2Processor
+from .processors.template3_processor import Template3Processor
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ class DocumentAutomaterService:
         self._processors = {
             "template.hwpx": Template1Processor(),
             "template2.hwpx": Template2Processor(),
+            "template3.hwpx": Template3Processor(),
         }
         logger.info(f"문서 자동화 처리기가 등록되었습니다: {list(self._processors.keys())}")
 

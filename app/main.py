@@ -3,6 +3,7 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 # 로깅 설정 (환경 변수로 레벨 조정 가능)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -23,7 +24,7 @@ from app.services.api_clients.llm_client import llm_client
 from app.services.api_clients.model_server_client import model_server_client
 from app.services.api_clients.stt_client import stt_client
 from app.services.utils.memory_service import memory_service
-from app.services.rag.rag_ingestion_service import _pdf_process_pool
+from app.services.rag.extractors import _pdf_process_pool
 
 
 @asynccontextmanager
@@ -55,6 +56,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/test", include_in_schema=False)
+async def test_ui():
+    return FileResponse("test_ui.html")
+
 
 app.include_router(health_router)
 app.include_router(chatbot_router)

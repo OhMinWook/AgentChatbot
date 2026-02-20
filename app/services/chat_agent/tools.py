@@ -65,7 +65,7 @@ class SearchTool:
         if not candidates:
             return {"context": None, "references": [], "results": []}
 
-        # 3. Reranking (인접 청크 필터링을 위해 더 많이 가져옴)
+        # 4. Reranking (인접 청크 필터링을 위해 더 많이 가져옴)
         documents = [
             add_source_prefix(c.content, c.metadata.get("source", ""))
             for c in candidates
@@ -79,49 +79,7 @@ class SearchTool:
         logger.info(f"[Search] Rerank 결과: {len(reranked)}개")
 
         # 4. 결과 조합 (인접 청크 제외)
-        results = []
-        selected_ids = set()  # 선택된 청크 ID
-        adjacent_ids = set()  # 인접 청크 ID (제외 대상)
-
-        for r in reranked:
-            if len(results) >= k:
-                break
-
-            # 점수 필터링 (최소 2개 보장, 이후 임계값 미만 제외)
-            score = r.get("score", 0.0)
-            if len(results) >= 2 and score < settings.RERANK_SCORE_THRESHOLD:
-                logger.debug(f"[Search] 낮은 점수 스킵: {score:.3f}")
-                continue
-
-            orig_idx = r.get("index", 0)
-            if orig_idx >= len(candidates):
-                continue
-
-            candidate = candidates[orig_idx]
-            doc_id = candidate.doc_id
-
-            # 이미 선택된 청크의 인접 청크면 스킵
-            if doc_id in adjacent_ids:
-                logger.debug(f"[Search] 인접 청크 스킵: {doc_id}")
-                continue
-
-            # 선택
-            results.append({
-                "doc_id": doc_id,
-                "score": r.get("score", 0.0),
-                "content": candidate.content,
-                "metadata": candidate.metadata
-            })
-            selected_ids.add(doc_id)
-
-            # 이 청크의 인접 청크를 제외 대상에 추가
-            prev_id = candidate.metadata.get("prev_chunk_id")
-            next_id = candidate.metadata.get("next_chunk_id")
-            if prev_id:
-                adjacent_ids.add(prev_id)
-            if next_id:
-                adjacent_ids.add(next_id)
-
+        results = self._rerank_and_filter(candidates, reranked, k)
         logger.info(f"[Search] 인접 청크 필터링 후: {len(results)}개")
 
         if not results:
@@ -147,6 +105,52 @@ class SearchTool:
 
         context = self._format_context(results)
         return {"context": context, "references": references, "results": results}
+
+    def _rerank_and_filter(self, candidates, reranked, k: int) -> List[Dict]:
+        """리랭크 결과에서 인접 청크 제외하며 top-k 선택"""
+        results = []
+        selected_ids = set()
+        adjacent_ids = set()
+
+        for r in reranked:
+            if len(results) >= k:
+                break
+
+            # 점수 필터링 (최소 2개 보장, 이후 임계값 미만 제외)
+            score = r.get("score", 0.0)
+            if len(results) >= 2 and score < settings.RERANK_SCORE_THRESHOLD:
+                logger.debug(f"[Search] 낮은 점수 스킵: {score:.3f}")
+                continue
+
+            orig_idx = r.get("index", 0)
+            if orig_idx >= len(candidates):
+                continue
+
+            candidate = candidates[orig_idx]
+            doc_id = candidate.doc_id
+
+            # 이미 선택된 청크의 인접 청크면 스킵
+            if doc_id in adjacent_ids:
+                logger.debug(f"[Search] 인접 청크 스킵: {doc_id}")
+                continue
+
+            results.append({
+                "doc_id": doc_id,
+                "score": score,
+                "content": candidate.content,
+                "metadata": candidate.metadata
+            })
+            selected_ids.add(doc_id)
+
+            # 이 청크의 인접 청크를 제외 대상에 추가
+            prev_id = candidate.metadata.get("prev_chunk_id")
+            next_id = candidate.metadata.get("next_chunk_id")
+            if prev_id:
+                adjacent_ids.add(prev_id)
+            if next_id:
+                adjacent_ids.add(next_id)
+
+        return results
 
     async def _append_following_chunks(self, results: List[Dict], count: int = 2) -> List[Dict]:
         """

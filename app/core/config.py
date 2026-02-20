@@ -27,10 +27,15 @@ class Settings(BaseModel):
     # [검색 설정]
     SEARCH_TOP_K: int = 6
 
-    # [청크 설정]
+    # [청크 설정 - RAG 문서 분할 (문자 기준)]
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
     CONTEXT_EXPAND_SIZE: int = 800
+
+    # [통화 요약 청크 설정 - tiktoken 토큰 기준]
+    CALLSUMMARY_CHUNK_THRESHOLD: int = 10000  # 이 토큰 수 이상이면 청크 분할
+    CALLSUMMARY_CHUNK_SIZE: int = 6500
+    CALLSUMMARY_CHUNK_OVERLAP: int = 500
 
     # [모델 스펙]
     EMBEDDING_DIM: int = 1024  # Qwen3-Embedding-0.6B

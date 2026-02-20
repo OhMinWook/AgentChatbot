@@ -11,4 +11,3 @@ libs
 *.pdf
 CLAUDE.md
 .env
-test_server.py

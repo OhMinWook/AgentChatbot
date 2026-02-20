@@ -2,6 +2,7 @@
 LangGraph 노드 함수 정의
 """
 
+import asyncio
 import json
 import logging
 from typing import Dict, Any, List, AsyncGenerator
@@ -18,26 +19,29 @@ from app.services.chat_agent.prompts import (
 from app.services.chat_agent.tools import create_search_tool
 from app.services.api_clients.llm_client import llm_client
 from app.core.config import settings
+from app.services.utils.llm_payload import build_chat_payload
 
 logger = logging.getLogger(__name__)
+
+_ANALYZE_REWRITE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_clear": {"type": "boolean"},
+        "clarification_message": {"type": "string"},
+        "rewritten_questions": {
+            "type": "array",
+            "items": {"type": "string"}
+        },
+        "reasoning": {"type": "string"}
+    },
+    "required": ["is_clear", "rewritten_questions"]
+}
 
 
 async def _call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json_schema: Dict = None) -> str:
     """LLM 호출 헬퍼 함수"""
     try:
-        payload = {
-            "model": settings.VLLM_MODEL,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": settings.DEFAULT_TEMPERATURE
-        }
-
-        # vLLM structured_outputs (JSON 양식 고정)
-        if json_schema:
-            payload["extra_body"] = {
-                "structured_outputs": {"json": json_schema}
-            }
-
+        payload = build_chat_payload(messages, max_tokens=max_tokens, json_schema=json_schema)
         response = await llm_client.chat_completions(payload)
         content = llm_client.extract_content(response)
         return content.strip()
@@ -66,28 +70,13 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
 
     logger.info(f"[Analyze] 쿼리 분석 시작: {query_for_analysis[:100]}...")
 
-    # JSON 스키마로 구조화된 응답 요청
-    json_schema = {
-        "type": "object",
-        "properties": {
-            "is_clear": {"type": "boolean"},
-            "clarification_message": {"type": "string"},
-            "rewritten_questions": {
-                "type": "array",
-                "items": {"type": "string"}
-            },
-            "reasoning": {"type": "string"}
-        },
-        "required": ["is_clear", "rewritten_questions"]
-    }
-
     response = await _call_llm(
         [
             {"role": "system", "content": ANALYZE_REWRITE.system},
             {"role": "user", "content": ANALYZE_REWRITE.user.format(user_query=query_for_analysis)}
         ],
         max_tokens=1024,
-        json_schema=json_schema
+        json_schema=_ANALYZE_REWRITE_JSON_SCHEMA
     )
 
     logger.debug(f"[Analyze] LLM 응답: {response[:500] if response else '(빈 응답)'}")
@@ -168,8 +157,6 @@ async def human_input_node(state: MainState) -> Dict[str, Any]:
 
 async def process_question_node(state: MainState) -> Dict[str, Any]:
     """질문 처리 노드 - 문서 검색 기반 답변 생성"""
-    import asyncio
-
     invoke_id = state.get("invoke_id", "")
     rewritten_questions = state.get("rewritten_questions", [])
     original_query = state.get("original_query", "")
@@ -319,12 +306,7 @@ async def aggregate_node(state: MainState) -> Dict[str, Any]:
 
 async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 2048) -> AsyncGenerator[str, None]:
     """vLLM SSE 스트리밍 응답을 토큰 단위로 yield하는 async generator"""
-    payload = {
-        "model": settings.VLLM_MODEL,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": settings.DEFAULT_TEMPERATURE
-    }
+    payload = build_chat_payload(messages, max_tokens=max_tokens)
 
     logger.info(f"[LLM Stream] 요청 시작 (max_tokens={max_tokens})")
     token_count = 0

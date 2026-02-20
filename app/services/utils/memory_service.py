@@ -2,18 +2,15 @@
 # 유저에 맞춘 장기 기억의 경우 MEM0를 통해 관리할 예정입니다. 이 부분은 아직 구현 되어 있지 않습니다.
 
 import json
-from redis import asyncio as aioredis
 from typing import List, Dict
+
 from app.core.config import settings
+from app.core.redis_client import async_redis
 
 
 class RedisMemoryService:
     def __init__(self):
-        # Redis 연결 풀 생성 (매번 연결하지 않고 재사용)
-        self.redis = aioredis.from_url(
-            f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}",
-            decode_responses=True  # 바이트가 아니라 문자열로 받기
-        )
+        self.redis = async_redis
 
     async def get_history(self, session_id: str) -> List[Dict[str, str]]:
         """

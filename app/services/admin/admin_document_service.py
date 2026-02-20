@@ -4,10 +4,13 @@
 Qdrant를 직접 사용하여 관리자 문서의 CRUD 작업을 처리합니다.
 """
 
+import asyncio
+import hashlib
 import logging
 import os
-import uuid
 import shutil
+import tempfile
+import uuid
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple, Any
 
@@ -17,7 +20,8 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.core.config import settings
 from app.services.api_clients.model_server_client import model_server_client
-from app.services.rag.rag_ingestion_service import rag_ingestion_service, IncrementalChunker
+from app.services.rag.chunker import IncrementalChunker
+from app.services.rag.extractors import file_text_extractor
 from app.services.rag.sparse_encoder import sparse_encoder
 from app.services.rag.text_utils import add_source_prefix
 
@@ -106,7 +110,6 @@ class AdminDocumentService:
             await self.delete_document(key)
 
         # 파일 저장 경로: uploaded_files/admin/{hash}/ (경로 길이 제한 방지)
-        import hashlib
         key_hash = hashlib.md5(key.encode()).hexdigest()[:16]
         admin_upload_dir = os.path.join(settings.UPLOAD_DIR, "admin", key_hash)
         os.makedirs(admin_upload_dir, exist_ok=True)
@@ -193,9 +196,6 @@ class AdminDocumentService:
 
     async def _extract_chunks(self, file_path: str, file_name: str) -> List[Dict]:
         """파일에서 청크 추출 (rag_ingestion_service 내부 로직 활용)"""
-        import asyncio
-        import tempfile
-
         _, ext = os.path.splitext(file_name)
         ext_lower = ext.lower()
 
@@ -204,71 +204,53 @@ class AdminDocumentService:
         if ext_lower == '.pdf':
             # PDF 직접 처리
             page_generator = await asyncio.to_thread(
-                lambda: list(rag_ingestion_service._iter_pdf_pages(file_path))
+                lambda: list(file_text_extractor.iter_pdf_pages(file_path))
             )
 
-            from app.services.rag.rag_ingestion_service import IncrementalChunker
             chunker = IncrementalChunker(
                 file_name=file_name,
                 chunk_size=settings.CHUNK_SIZE,
                 chunk_overlap=settings.CHUNK_OVERLAP,
             )
-
             for page_num, page_text in page_generator:
-                new_chunks = chunker.add_page(page_num, page_text)
-                chunks.extend(new_chunks)
-
-            remaining = chunker.flush()
-            chunks.extend(remaining)
+                chunks.extend(chunker.add_page(page_num, page_text))
+            chunks.extend(chunker.flush())
 
         elif ext_lower in ['.hwp', '.hwpx']:
             # HWP -> PDF 변환 후 처리
             temp_pdf_dir = tempfile.mkdtemp()
             try:
                 converted_pdf = await asyncio.to_thread(
-                    rag_ingestion_service._convert_hwp_to_pdf_with_win32com,
+                    file_text_extractor.convert_hwp_to_pdf,
                     file_path,
                     temp_pdf_dir,
                 )
                 if converted_pdf and os.path.exists(converted_pdf):
                     page_generator = await asyncio.to_thread(
-                        lambda: list(rag_ingestion_service._iter_pdf_pages(converted_pdf))
+                        lambda: list(file_text_extractor.iter_pdf_pages(converted_pdf))
                     )
-
-                    from app.services.rag.rag_ingestion_service import IncrementalChunker
                     chunker = IncrementalChunker(
                         file_name=file_name,
                         chunk_size=settings.CHUNK_SIZE,
                         chunk_overlap=settings.CHUNK_OVERLAP,
                     )
-
                     for page_num, page_text in page_generator:
-                        new_chunks = chunker.add_page(page_num, page_text)
-                        chunks.extend(new_chunks)
-
-                    remaining = chunker.flush()
-                    chunks.extend(remaining)
+                        chunks.extend(chunker.add_page(page_num, page_text))
+                    chunks.extend(chunker.flush())
             finally:
                 shutil.rmtree(temp_pdf_dir, ignore_errors=True)
 
         else:
             # 기타 문서 (MarkItDown 사용)
-            if rag_ingestion_service._markitdown:
-                try:
-                    import asyncio
-                    result = await asyncio.to_thread(
-                        rag_ingestion_service._markitdown.convert, file_path
-                    )
-                    if result and result.text_content:
-                        chunker = IncrementalChunker(
-                            file_name=file_name,
-                            chunk_size=settings.CHUNK_SIZE,
-                            chunk_overlap=settings.CHUNK_OVERLAP,
-                        )
-                        chunks = chunker.add_page(1, result.text_content)
-                        chunks.extend(chunker.flush())
-                except Exception as e:
-                    logger.error(f"[AdminDocument] MarkItDown error: {e}")
+            text_content = await asyncio.to_thread(file_text_extractor.convert_sync, file_path)
+            if text_content:
+                chunker = IncrementalChunker(
+                    file_name=file_name,
+                    chunk_size=settings.CHUNK_SIZE,
+                    chunk_overlap=settings.CHUNK_OVERLAP,
+                )
+                chunks = chunker.add_page(1, text_content)
+                chunks.extend(chunker.flush())
 
         # prev/next 청크 ID 연결
         for i, chunk in enumerate(chunks):
@@ -316,7 +298,6 @@ class AdminDocumentService:
             )
 
             # 파일 삭제 (경로는 key 해시 사용)
-            import hashlib
             key_hash = hashlib.md5(key.encode()).hexdigest()[:16]
             admin_upload_dir = os.path.join(settings.UPLOAD_DIR, "admin", key_hash)
             if os.path.exists(admin_upload_dir):

@@ -1,7 +1,7 @@
 """문서 요약용 프롬프트 빌더 - 질문 분해 기반 체계적 요약"""
 
 from typing import Dict, Any, List
-from app.core.config import settings
+from app.services.utils.llm_payload import build_chat_payload
 
 
 class DocumentSummaryPromptBuilder:
@@ -83,29 +83,19 @@ class DocumentSummaryPromptBuilder:
         """단순 요약용 payload 생성 (20페이지 미만)"""
         user_content = f"[문서: {file_name}]\n\n{context}\n\n위 문서를 요약해줘."
 
-        return {
-            "model": settings.VLLM_MODEL,
-            "messages": [
-                {"role": "system", "content": self.simple_summary_prompt},
-                {"role": "user", "content": user_content}
-            ],
-            "max_tokens": settings.DEFAULT_MAX_TOKENS,
-            "temperature": settings.DEFAULT_TEMPERATURE,
-        }
+        return build_chat_payload([
+            {"role": "system", "content": self.simple_summary_prompt},
+            {"role": "user", "content": user_content}
+        ])
 
     def build_qa_payload(self, question: str, context: str) -> Dict[str, Any]:
         """개별 질문-답변용 payload 생성"""
         user_content = f"[문서 내용]\n{context}\n\n[질문]\n{question}"
 
-        return {
-            "model": settings.VLLM_MODEL,
-            "messages": [
-                {"role": "system", "content": self.qa_system_prompt},
-                {"role": "user", "content": user_content}
-            ],
-            "max_tokens": 512,
-            "temperature": settings.DEFAULT_TEMPERATURE,
-        }
+        return build_chat_payload([
+            {"role": "system", "content": self.qa_system_prompt},
+            {"role": "user", "content": user_content}
+        ], max_tokens=512)
 
     def build_merge_payload(self, qa_results: Dict[str, str], file_name: str) -> Dict[str, Any]:
         """분석 결과 통합용 payload 생성"""
@@ -123,15 +113,10 @@ class DocumentSummaryPromptBuilder:
         combined = "\n\n".join(formatted_results)
         user_content = f"[문서명: {file_name}]\n\n{combined}\n\n위 분석 결과를 하나의 요약으로 통합해줘."
 
-        return {
-            "model": settings.VLLM_MODEL,
-            "messages": [
-                {"role": "system", "content": self.merge_system_prompt},
-                {"role": "user", "content": user_content}
-            ],
-            "max_tokens": settings.DEFAULT_MAX_TOKENS,
-            "temperature": settings.DEFAULT_TEMPERATURE,
-        }
+        return build_chat_payload([
+            {"role": "system", "content": self.merge_system_prompt},
+            {"role": "user", "content": user_content}
+        ])
 
 # 싱글톤 인스턴스
 document_summary_prompt_builder = DocumentSummaryPromptBuilder()

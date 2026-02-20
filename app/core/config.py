@@ -3,7 +3,7 @@ import os
 
 class Settings(BaseModel):
     # 통합 Model Server URL (LLM + STT + Embedding)
-    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://213.173.111.112:42709")
+    MODEL_SERVER_URL: str = os.getenv("MODEL_SERVER_URL", "http://213.173.111.112:32651")
     VLLM_MODEL: str = os.getenv("VLLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B-AWQ")
 
     # LLM 기본 설정
@@ -39,7 +39,7 @@ class Settings(BaseModel):
     QDRANT_HOST: str = os.getenv("QDRANT_HOST", "localhost")
     QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))
     QDRANT_COLLECTION: str = os.getenv("QDRANT_COLLECTION", "documents")
-    EMBEDDING_DIM: int = 1024  # Qwen3-Embedding-0.6B 차원
+    EMBEDDING_DIM: int = 1024
 
     # [글로벌 문서 설정] 관리자가 올린 공용 문서의 invoke_id
     GLOBAL_INVOKE_ID: str = os.getenv("GLOBAL_INVOKE_ID", "__global__")

@@ -32,7 +32,6 @@ _ANALYZE_REWRITE_JSON_SCHEMA = {
             "type": "array",
             "items": {"type": "string"}
         },
-        "reasoning": {"type": "string"}
     },
     "required": ["is_clear", "rewritten_questions"]
 }
@@ -75,7 +74,7 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
             {"role": "system", "content": ANALYZE_REWRITE.system},
             {"role": "user", "content": ANALYZE_REWRITE.user.format(user_query=query_for_analysis)}
         ],
-        max_tokens=1024,
+        max_tokens=512,
         json_schema=_ANALYZE_REWRITE_JSON_SCHEMA
     )
 
@@ -108,6 +107,22 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
         is_clear = result.get("is_clear", True)
         rewritten_questions = result.get("rewritten_questions", [original_query])
         clarification_message = result.get("clarification_message", DEFAULT_CLARIFICATION_MESSAGE)
+
+        # private chat: 같은 문서에서만 검색하므로 질문 분리 최대 2개로 제한
+        if filter_filename and len(rewritten_questions) > 2:
+            rewritten_questions = rewritten_questions[:2]
+            logger.info(f"[Analyze] Private chat: 질문 2개로 제한")
+
+        # private chat: 재작성된 질문에 파일명이 포함된 경우 제거 (후처리 보완)
+        if filter_filename:
+            file_label = filter_filename.rsplit(".", 1)[0]
+            cleaned = []
+            for q in rewritten_questions:
+                if file_label in q:
+                    q = q.replace(file_label, "").strip().lstrip("의은는이가에서 ").strip()
+                    logger.debug(f"[Analyze] 파일명 제거 후: {q}")
+                cleaned.append(q)
+            rewritten_questions = cleaned
 
         # 쿼리 분석 결과 로깅
         logger.info(f"[Analyze] 원본 쿼리: {original_query}")

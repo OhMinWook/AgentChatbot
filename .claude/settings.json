@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json,sys,py_compile; d=json.load(sys.stdin); f=d.get('tool_input',{}).get('file_path',''); py_compile.compile(f,doraise=True) if f.endswith('.py') else None\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

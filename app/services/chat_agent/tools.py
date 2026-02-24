@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 RERANK_CANDIDATES = 64
 
 
+
 class SearchTool:
     """문서 검색 도구"""
 

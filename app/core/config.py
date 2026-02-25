@@ -43,6 +43,11 @@ class Settings(BaseModel):
     # [Polaris 설정]
     POLARIS_ENABLED: bool = False
 
+    # [Contextual Retrieval]
+    CONTEXTUAL_RETRIEVAL_ENABLED: bool = os.getenv("CONTEXTUAL_RETRIEVAL_ENABLED", "false").lower() == "true"
+    CONTEXTUAL_RETRIEVAL_MAX_DOC_CHARS: int = int(os.getenv("CONTEXTUAL_RETRIEVAL_MAX_DOC_CHARS", "8000"))
+    CONTEXTUAL_RETRIEVAL_BATCH_SIZE: int = int(os.getenv("CONTEXTUAL_RETRIEVAL_BATCH_SIZE", "32"))
+
     # [글로벌 문서 설정]
     GLOBAL_INVOKE_ID: str = os.getenv("GLOBAL_INVOKE_ID", "__global__")
 

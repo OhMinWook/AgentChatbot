@@ -10,11 +10,13 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 from app.core.config import settings
+from app.services.api_clients.llm_client import llm_client
 from app.services.api_clients.model_server_client import model_server_client
 from app.services.rag.chunker import build_chunks
 from app.services.rag.extractors import file_text_extractor
 from app.services.rag.qdrant_service import qdrant_service
 from app.services.rag.sparse_encoder import sparse_encoder
+from app.services.utils.llm_payload import build_chat_payload
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,52 @@ class RagIngestionService:
             if len(page_results) > 10:
                 preview += f"\n\n... ({len(page_results) - 10}페이지 생략)"
             await on_markdown(preview)
+
+    async def _generate_chunk_context(self, doc_text: str, chunk_content: str) -> str:
+        """LLM으로 청크의 문서 내 맥락을 1~2문장으로 생성"""
+        messages = [
+            {
+                "role": "system",
+                "content": "문서 청크의 검색 품질을 높이기 위한 짧은 맥락을 1~2문장으로 작성하세요. 다른 설명 없이 맥락만 출력하세요."
+            },
+            {
+                "role": "user",
+                "content": f"<document>\n{doc_text}\n</document>\n\n<chunk>\n{chunk_content}\n</chunk>"
+            }
+        ]
+        payload = build_chat_payload(messages, max_tokens=150)
+        response = await llm_client.chat_completions(payload)
+        return llm_client.extract_content(response).strip()
+
+    async def _add_context_to_chunks(self, doc_text: str, chunks: List[Dict], on_progress=None) -> List[Dict]:
+        """청크에 LLM 생성 맥락을 붙임 (병렬 배치 처리)"""
+        limited_doc = doc_text[:settings.CONTEXTUAL_RETRIEVAL_MAX_DOC_CHARS]
+        batch_size = settings.CONTEXTUAL_RETRIEVAL_BATCH_SIZE
+        total = len(chunks)
+
+        logger.info(f"[Contextual] 컨텍스트 생성 시작: {total}개 청크")
+
+        for i in range(0, total, batch_size):
+            batch = chunks[i:i + batch_size]
+
+            async def add_context(chunk):
+                try:
+                    context = await self._generate_chunk_context(limited_doc, chunk["content"])
+                    if context:
+                        chunk["content"] = f"{context}\n{chunk['content']}"
+                except Exception as e:
+                    logger.warning(f"[Contextual] 컨텍스트 생성 실패 (스킵): {e}")
+                return chunk
+
+            await asyncio.gather(*[add_context(c) for c in batch])
+
+            processed = min(i + batch_size, total)
+            logger.info(f"[Contextual] {processed}/{total}개 완료")
+            if on_progress:
+                pct = 30 + int(8 * processed / total)  # 30~38% 구간
+                await on_progress(pct, f"컨텍스트 생성 중... ({processed}/{total})")
+
+        return chunks
 
     async def _process_batch(
         self,
@@ -126,7 +174,12 @@ class RagIngestionService:
             logger.warning(f"[Ingestion] 청크 생성 실패: {file_name}")
             return
 
-        # 6. 임베딩 + 인덱싱
+        # 6. Contextual Retrieval (설정 시 활성화)
+        if settings.CONTEXTUAL_RETRIEVAL_ENABLED:
+            doc_text = markdown_content or "\n".join(t for _, t in (page_results or []))
+            all_chunks = await self._add_context_to_chunks(doc_text, all_chunks, on_progress)
+
+        # 7. 임베딩 + 인덱싱
         await self._process_batch(all_chunks, invoke_id, on_progress)
 
         logger.info(f"[Ingestion] 완료: {file_name} ({max_page}페이지, {len(all_chunks)}청크)")

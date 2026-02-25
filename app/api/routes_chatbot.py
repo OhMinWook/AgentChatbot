@@ -109,7 +109,7 @@ async def upload_document(
                     await queue.put(create_sse_data({"type": SSEType.DONE, "message": "문서 등록이 완료되었습니다."}))
                 except Exception as e:
                     logger.error(f"[Upload Stream Error] {e}")
-                    await queue.put(create_sse_data({"type": SSEType.ERROR, "detail": str(e)}))
+                    await queue.put(create_sse_data({"type": SSEType.ERROR, "detail": "파일 처리 중 오류가 발생했습니다."}))
                 finally:
                     # 종료 신호
                     await queue.put(None)
@@ -131,7 +131,7 @@ async def upload_document(
 
     except Exception as e:
         logger.error(f"[Upload Failed] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="파일 업로드 중 오류가 발생했습니다.")
 
 
 @router.post("/message/private/{invokeId}", summary="특정 문서 지정 대화 (Private Search)")
@@ -155,7 +155,7 @@ async def send_private_message(
 
     except Exception as e:
         logger.error(f"[Private Message Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="요청 처리 중 오류가 발생했습니다.")
 
 
 @router.post("/message/open/{invokeId}", summary="전체 문서 대화 (Global Search)")
@@ -175,7 +175,7 @@ async def send_open_message(
 
     except Exception as e:
         logger.error(f"[Open Message Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="요청 처리 중 오류가 발생했습니다.")
 
 
 @router.post("/message/{invokeId}/continue", summary="Human-in-the-loop 계속")
@@ -205,7 +205,7 @@ async def continue_conversation(
 
     except Exception as e:
         logger.error(f"[Continue Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="요청 처리 중 오류가 발생했습니다.")
 
 
 @router.get("/files/{invokeId}", summary="업로드된 파일 목록 조회")
@@ -224,7 +224,7 @@ async def get_uploaded_files(invokeId: str):
 
     except Exception as e:
         logger.error(f"[File List Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="파일 목록 조회 중 오류가 발생했습니다.")
 
 
 @router.get("/history/{invokeId}", summary="대화 기록 조회")
@@ -250,7 +250,7 @@ async def get_chat_history(invokeId: str):
         }
     except Exception as e:
         logger.error(f"[History Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="대화 기록 조회 중 오류가 발생했습니다.")
 
 
 @router.post("/message/document-summary/{invokeId}", summary="문서 체계적 요약 (SSE)")
@@ -305,7 +305,7 @@ async def summarize_document(
 
             except Exception as e:
                 logger.error(f"[Document Summary Error] {e}")
-                result_holder["error"] = str(e)
+                result_holder["error"] = "문서 요약 중 오류가 발생했습니다."
             finally:
                 await queue.put(None)
 

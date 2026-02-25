@@ -6,6 +6,7 @@ python-multipart==0.0.22       # 파일 업로드(Form/File) 필수
 
 # 2. Networking & HTTP
 httpx==0.28.1                  # LLM/STT/Model 서버 통신
+python-dotenv==1.1.0           # .env 파일 로드
 
 # 3. Database
 redis==7.1.0                   # 대화 히스토리

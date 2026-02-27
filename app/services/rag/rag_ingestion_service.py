@@ -28,8 +28,10 @@ class RagIngestionService:
         """파일 확장자 기반 처리 타입 결정 (polaris / pdf / markitdown)"""
         _, ext = os.path.splitext(file_name)
         ext_lower = ext.lower().strip()
-        if settings.POLARIS_ENABLED or ext_lower in ['.hwp', '.hwpx']:
+        if settings.POLARIS_ENABLED:
             return "polaris"
+        if ext_lower in ['.hwp', '.hwpx']:
+            return "hwp_win32"
         if ext_lower == '.pdf':
             return "pdf"
         return "markitdown"

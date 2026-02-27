@@ -249,6 +249,26 @@ class FileTextExtractor:
             logger.error(f"[Extractor] MarkItDown 오류: {e}")
             return None
 
+    async def extract_with_win32hwp(self, file_path: str, on_progress=None) -> Optional[List[Tuple[int, str]]]:
+        """HWP → PDF (win32com) → 텍스트 추출"""
+        if on_progress:
+            await on_progress(5, "HWP 문서 변환 중...")
+        temp_dir = tempfile.mkdtemp()
+        try:
+            loop = asyncio.get_event_loop()
+            pdf_path = await loop.run_in_executor(
+                None,  # thread pool (COM 객체는 프로세스 풀 불가)
+                self.convert_hwp_to_pdf,
+                file_path,
+                temp_dir
+            )
+            if not pdf_path:
+                logger.error("[Extractor] HWP → PDF 변환 실패")
+                return None
+            return await self.extract_pdf_pages(pdf_path, on_progress)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     async def extract_text(
         self, file_path: str, file_type: str, on_progress=None
     ) -> Tuple[Optional[List[Tuple[int, str]]], Optional[str]]:
@@ -263,6 +283,8 @@ class FileTextExtractor:
             return await self.extract_pdf_pages(file_path, on_progress), None
         if file_type == "polaris":
             return None, await self.extract_with_polaris(file_path, on_progress)
+        if file_type == "hwp_win32":
+            return await self.extract_with_win32hwp(file_path, on_progress), None
         return None, await self.extract_with_markitdown(file_path, on_progress)
 
 

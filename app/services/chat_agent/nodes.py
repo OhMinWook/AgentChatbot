@@ -9,7 +9,7 @@ from typing import Dict, Any, List, AsyncGenerator
 
 from langchain_core.messages import HumanMessage, AIMessage
 
-from app.services.chat_agent.graph_state import MainState, AgentSubState
+from app.services.chat_agent.graph_state import MainState
 from app.services.chat_agent.prompts import (
     ANALYZE_REWRITE,
     AGENT,

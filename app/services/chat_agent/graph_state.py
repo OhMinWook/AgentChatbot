@@ -27,11 +27,6 @@ class MainState(MessagesState):
     filter_filename: Optional[str] = None  # 특정 파일 검색 필터
     streaming_payload: Optional[dict] = None  # SSE adapter에서 스트리밍 생성에 사용
 
-    # RAG 답변 충분성 검증 관련
-    answer_is_sufficient: bool = True  # RAG 답변이 충분한지 여부
-    rag_clarification_count: int = 0  # RAG 불충분으로 인한 재질문 횟수
-    rag_validation_result: Optional[dict] = None  # 검증 결과 (found_topics, missing_info 등)
-
 
 class AgentSubState(TypedDict):
     """개별 에이전트 서브그래프 상태"""

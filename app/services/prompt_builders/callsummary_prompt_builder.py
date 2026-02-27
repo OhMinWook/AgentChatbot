@@ -3,13 +3,10 @@
 import tiktoken
 from typing import Dict, Any, Optional, List
 from app.core.config import settings
+from app.services.utils.llm_payload import build_chat_payload
 
 
 class CallSummaryPromptBuilder:
-    # 청크 분할 설정 (tiktoken 기준, 한글은 과대추정되므로 여유있게 설정)
-    CHUNK_THRESHOLD = 10000  # 이 토큰 수 이상이면 분할
-    CHUNK_SIZE = 6500        # 청크 크기
-    CHUNK_OVERLAP = 500      # 오버랩 크기
 
     def __init__(self):
         # tiktoken 인코더 초기화 (cl100k_base: GPT-4 기준)
@@ -45,36 +42,36 @@ class CallSummaryPromptBuilder:
 
         # 기본 출력 포맷
         self.default_output_format = """
-다음 형식으로 요약해줘:
+        다음 형식으로 요약해줘:
 
-## 인물 관계
-**추론 결과는 군더더기 없이 명사형 단어 하나 혹은 구문으로만 출력하세요.정보가 부족하면 '알 수 없음' 으로 출력**
-(예: 직장 동료, 친구, 비즈니스 파트너, 점원, 손님)
+        ## 인물 관계
+        **추론 결과는 군더더기 없이 명사형 단어 하나 혹은 구문으로만 출력하세요.정보가 부족하면 '알 수 없음' 으로 출력**
+        (예: 직장 동료, 친구, 비즈니스 파트너, 점원, 손님)
 
-## 📞 통화 한 줄 요약
-이 통화의 핵심 목적/결론 (30자 내외)
+        ## 📞 통화 한 줄 요약
+        이 통화의 핵심 목적/결론 (30자 내외)
 
-## 📝 상세 내용
-### 주요 대화 흐름
-1. [첫 번째 주제] - 내용 정리
-2. [두 번째 주제] - 내용 정리
-3. ...
+        ## 📝 상세 내용
+        ### 주요 대화 흐름
+        1. [첫 번째 주제] - 내용 정리
+        2. [두 번째 주제] - 내용 정리
+        3. ...
 
-### 언급된 구체적 정보
-- 날짜/시간: (언급된 경우)
-- 장소: (언급된 경우)
-- 금액/수량: (언급된 경우)
-- 인물/기관: (언급된 경우)
-- 기타 중요 정보: (언급된 경우)
+        ### 언급된 구체적 정보
+        - 날짜/시간: (언급된 경우)
+        - 장소: (언급된 경우)
+        - 금액/수량: (언급된 경우)
+        - 인물/기관: (언급된 경우)
+        - 기타 중요 정보: (언급된 경우)
 
-## 📅 일정 및 할 일
-(※ 통화에서 **명확히 합의된** 내용만 작성)
-- [ ] 할 일 내용 (담당자, 기한 있으면 포함)
-- 없으면 '합의된 일정 없음'
+        ## 📅 일정 및 할 일
+        (※ 통화에서 **명확히 합의된** 내용만 작성)
+        - [ ] 할 일 내용 (담당자, 기한 있으면 포함)
+        - 없으면 '합의된 일정 없음'
 
-## 🏷️ 태그
-관련 키워드 3~5개
-"""
+        ## 🏷️ 태그
+        관련 키워드 3~5개
+        """
 
     def build_summary_payload(
         self,
@@ -109,14 +106,7 @@ class CallSummaryPromptBuilder:
             {"role": "user", "content": user_content}
         ]
 
-        payload = {
-            "model": settings.VLLM_MODEL,
-            "messages": messages,
-            "max_tokens": settings.DEFAULT_MAX_TOKENS,
-            "temperature": settings.DEFAULT_TEMPERATURE,
-        }
-
-        return payload
+        return build_chat_payload(messages)
 
     def count_tokens(self, text: str) -> int:
         """tiktoken으로 토큰 수 측정"""
@@ -124,7 +114,7 @@ class CallSummaryPromptBuilder:
 
     def needs_chunking(self, transcript: str) -> bool:
         """청크 분할이 필요한지 확인"""
-        return self.count_tokens(transcript) >= self.CHUNK_THRESHOLD
+        return self.count_tokens(transcript) >= settings.CALLSUMMARY_CHUNK_THRESHOLD
 
     def split_into_chunks(self, transcript: str) -> List[str]:
         """
@@ -138,7 +128,7 @@ class CallSummaryPromptBuilder:
         total_tokens = len(tokens)
 
         while start < total_tokens:
-            end = min(start + self.CHUNK_SIZE, total_tokens)
+            end = min(start + settings.CALLSUMMARY_CHUNK_SIZE, total_tokens)
 
             # 청크 토큰을 텍스트로 디코딩
             chunk_tokens = tokens[start:end]
@@ -161,7 +151,7 @@ class CallSummaryPromptBuilder:
             chunks.append(chunk_text.strip())
 
             # 다음 시작점 (오버랩 적용)
-            start = end - self.CHUNK_OVERLAP
+            start = end - settings.CALLSUMMARY_CHUNK_OVERLAP
             if start >= total_tokens:
                 break
 
@@ -200,12 +190,7 @@ class CallSummaryPromptBuilder:
             {"role": "user", "content": user_content}
         ]
 
-        return {
-            "model": settings.VLLM_MODEL,
-            "messages": messages,
-            "max_tokens": 1024,  # 청크 요약은 짧게
-            "temperature": settings.DEFAULT_TEMPERATURE,
-        }
+        return build_chat_payload(messages, max_tokens=1024)
 
     def build_final_summary_payload(self, combined_summary: str) -> Dict[str, Any]:
         """
@@ -221,12 +206,7 @@ class CallSummaryPromptBuilder:
             {"role": "user", "content": user_content}
         ]
 
-        return {
-            "model": settings.VLLM_MODEL,
-            "messages": messages,
-            "max_tokens": settings.DEFAULT_MAX_TOKENS,
-            "temperature": settings.DEFAULT_TEMPERATURE,
-        }
+        return build_chat_payload(messages)
 
 
 # 싱글톤 인스턴스

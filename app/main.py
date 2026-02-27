@@ -1,8 +1,10 @@
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 # 로깅 설정 (환경 변수로 레벨 조정 가능)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -23,7 +25,7 @@ from app.services.api_clients.llm_client import llm_client
 from app.services.api_clients.model_server_client import model_server_client
 from app.services.api_clients.stt_client import stt_client
 from app.services.utils.memory_service import memory_service
-from app.services.rag.rag_ingestion_service import _pdf_process_pool
+from app.services.rag.extractors import _pdf_process_pool
 
 
 @asynccontextmanager
@@ -42,6 +44,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="LLM Gateway", version="0.1.0", lifespan=lifespan)
 
+# 타이밍 미들웨어
+timing_logger = logging.getLogger("timing")
+
+@app.middleware("http")
+async def timing_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed = time.perf_counter() - start
+    timing_logger.info(
+        "[TIMING] %s %s → %.3fs (status=%s)",
+        request.method, request.url.path, elapsed, response.status_code
+    )
+    response.headers["X-Process-Time"] = f"{elapsed:.3f}"
+    return response
+
 # CORS 설정 (환경 변수 CORS_ORIGINS로 허용 도메인 설정, 쉼표 구분)
 # 예: CORS_ORIGINS="http://localhost:3000,https://example.com"
 # 기본값: 모든 도메인 허용 (개발용)
@@ -55,6 +72,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/test", include_in_schema=False)
+async def test_ui():
+    return FileResponse("test_ui.html")
+
 
 app.include_router(health_router)
 app.include_router(chatbot_router)

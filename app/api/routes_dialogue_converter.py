@@ -13,6 +13,36 @@ from app.services.utils.sse_utils import SSEType, create_sse_data, create_sse_re
 
 router = APIRouter()
 
+# 모듈 레벨(상수값 처리)에서 처리
+async def _summarize_daily_segments(date_segments: list) -> list:
+    """날짜별 세그먼트를 병렬로 요약"""
+    async def summarize_one(segment: dict, idx: int) -> dict:
+        start = time.time()
+        logger.info(f"[LLM #{idx}] 시작 - {segment['date']}")
+        payload = dialogue_prompt_builder.build_daily_summary_payload(
+            segment["date"], segment["text"]
+        )
+        response = await llm_client.chat_completions(payload)
+        summary = llm_client.extract_content(response)
+        elapsed = time.time() - start
+        logger.info(f"[LLM #{idx}] 완료 - {segment['date']} ({elapsed:.2f}s)")
+        return {"date": segment["date"], "summary": summary}
+
+    return list(await asyncio.gather(
+        *(summarize_one(seg, i) for i, seg in enumerate(date_segments))
+    ))
+
+# 모듈 레벨(상수값 처리)에서 처리
+async def _summarize_overall(daily_summaries: list) -> str:
+    """전체 요약 생성"""
+    logger.info("[Dialogue Summary] 전체 요약 시작")
+    overall_payload = dialogue_prompt_builder.build_overall_summary_payload(daily_summaries)
+    overall_response = await llm_client.chat_completions(overall_payload)
+    overall_summary = llm_client.extract_content(overall_response)
+    logger.info("[Dialogue Summary] 전체 요약 완료")
+    return overall_summary
+
+
 @router.post("/convert/dialogue", summary="CSV 채팅 로그를 대화록 텍스트로 변환")
 async def convert_dialogue_from_csv(
         csv_file: UploadFile = File(..., description="업로드할 채팅 로그 CSV 파일")
@@ -105,26 +135,7 @@ async def summarize_dialogue_from_csv(
                 "message": f"날짜별 요약 중... ({len(date_segments)}개)"
             })
 
-            batch_start = time.time()
-
-            async def summarize_one(segment: dict, idx: int) -> dict:
-                start = time.time()
-                logger.info(f"[LLM #{idx}] 시작 - {segment['date']}")
-
-                payload = dialogue_prompt_builder.build_daily_summary_payload(
-                    segment["date"], segment["text"]
-                )
-                response = await llm_client.chat_completions(payload)
-                summary = llm_client.extract_content(response)
-
-                elapsed = time.time() - start
-                logger.info(f"[LLM #{idx}] 완료 - {segment['date']} ({elapsed:.2f}s)")
-                return {"date": segment["date"], "summary": summary}
-
-            daily_summaries = await asyncio.gather(
-                *(summarize_one(seg, i) for i, seg in enumerate(date_segments))
-            )
-            daily_summaries = list(daily_summaries)
+            daily_summaries = await _summarize_daily_segments(date_segments)
             logger.info(f"[Dialogue Summary] 날짜별 요약 완료: {len(daily_summaries)}개")
 
             # 5. 전체 요약
@@ -134,11 +145,7 @@ async def summarize_dialogue_from_csv(
                 "message": "전체 요약 생성 중..."
             })
 
-            logger.info("[Dialogue Summary] 전체 요약 시작")
-            overall_payload = dialogue_prompt_builder.build_overall_summary_payload(daily_summaries)
-            overall_response = await llm_client.chat_completions(overall_payload)
-            overall_summary = llm_client.extract_content(overall_response)
-            logger.info("[Dialogue Summary] 전체 요약 완료")
+            overall_summary = await _summarize_overall(daily_summaries)
 
             yield create_sse_data({
                 "type": SSEType.RESULT,

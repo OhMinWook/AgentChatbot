@@ -1,31 +1,21 @@
 """STT 서버와 통신하는 클라이언트"""
 import logging
+from pathlib import Path
+
 import httpx
+
 from app.core.config import settings
+from app.services.api_clients.base_client import BaseAPIClient
 
 logger = logging.getLogger(__name__)
 
 
-class STTClient:
+class STTClient(BaseAPIClient):
     def __init__(self):
-        self.base_url = settings.MODEL_SERVER_URL
-        self.timeout = settings.STT_TIMEOUT  # STT는 오래 걸릴 수 있으므로 5분
-
-        # 클라이언트는 lazy initialization (첫 사용 시 생성)
-        self._client: httpx.AsyncClient | None = None
-
-    @property
-    def client(self) -> httpx.AsyncClient:
-        """비동기 클라이언트 (lazy initialization)"""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
-        return self._client
-
-    async def close(self):
-        """클라이언트 정리"""
-        if self._client is not None and not self._client.is_closed:
-            await self._client.aclose()
-            self._client = None
+        super().__init__(
+            base_url=settings.MODEL_SERVER_URL,
+            timeout=settings.STT_TIMEOUT,
+        )
 
     async def transcribe(self, file_path: str) -> str:
         """
@@ -34,26 +24,9 @@ class STTClient:
         :param file_path: 로컬에 저장된 오디오 파일 경로
         :return: 변환된 텍스트
         """
-        url = f"{self.base_url}/v1/audio/transcriptions"
-
-        try:
-            # 파일을 multipart/form-data로 전송 (OpenAI 호환 형식)
-            with open(file_path, "rb") as audio_file:
-                files = {"file": audio_file}
-                data = {"model": "whisper-large-v3-turbo"}
-                response = await self.client.post(url, files=files, data=data)
-                response.raise_for_status()
-
-            result = response.json()
-            # OpenAI 호환 응답: {"text": "...", "language": "...", ...}
-            return result.get("text", "")
-
-        except httpx.HTTPStatusError as e:
-            logger.error(f"STT Server Error: {e.response.text}")
-            raise e
-        except httpx.RequestError as e:
-            logger.error(f"STT Connection Error: {e}")
-            raise e
+        with open(file_path, "rb") as f:
+            audio_bytes = f.read()
+        return await self.transcribe_bytes(audio_bytes, Path(file_path).name)
 
     async def transcribe_bytes(self, audio_bytes: bytes, filename: str = "audio.wav") -> str:
         """
@@ -64,22 +37,18 @@ class STTClient:
         :return: 변환된 텍스트
         """
         url = f"{self.base_url}/v1/audio/transcriptions"
+        files = {"file": (filename, audio_bytes)}
+        data = {"model": "whisper-large-v3-turbo"}
 
         try:
-            files = {"file": (filename, audio_bytes)}
-            data = {"model": "whisper-large-v3-turbo"}
-            response = await self.client.post(url, files=files, data=data)
-            response.raise_for_status()
-
-            result = response.json()
-            return result.get("text", "")
-
+            response = await self._request_with_retry("POST", url, files=files, data=data)
+            return response.json().get("text", "")
         except httpx.HTTPStatusError as e:
             logger.error(f"STT Server Error: {e.response.text}")
-            raise e
+            raise
         except httpx.RequestError as e:
             logger.error(f"STT Connection Error: {e}")
-            raise e
+            raise
 
 
 # 싱글톤 인스턴스

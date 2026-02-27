@@ -235,14 +235,10 @@ class SSEGraphAdapter:
 
             if final_state:
                 if final_state.get("awaiting_human_input"):
-                    # 명확화 대기 상태 등록 (timestamp 포함)
-                    self._pending_threads[invoke_id] = (thread_id, time.time())
-                    clarification = final_state.get("clarification_message", "질문을 더 구체적으로 해주세요.")
-                    yield self._format_sse({
-                        "type": SSEType.CLARIFICATION,
-                        "message": clarification,
-                        "thread_id": thread_id
-                    })
+                    async for chunk in self._handle_clarification(
+                        invoke_id, thread_id, final_state, "질문을 더 구체적으로 해주세요."
+                    ):
+                        yield chunk
                     return
 
                 async for chunk in self._emit_final_answer(final_state):
@@ -320,16 +316,12 @@ class SSEGraphAdapter:
             async for event in self.graph.astream(None, config, stream_mode="values"):
                 final_state = event
 
-            if final_state:
+            if final_state: 
                 if final_state.get("awaiting_human_input"):
-                    # 다시 명확화 대기 상태 등록 (timestamp 포함)
-                    self._pending_threads[invoke_id] = (thread_id, time.time())
-                    clarification = final_state.get("clarification_message", "조금 더 구체적으로 설명해 주세요.")
-                    yield self._format_sse({
-                        "type": SSEType.CLARIFICATION,
-                        "message": clarification,
-                        "thread_id": thread_id
-                    })
+                    async for chunk in self._handle_clarification(
+                        invoke_id, thread_id, final_state, "조금 더 구체적으로 설명해 주세요."
+                    ):
+                        yield chunk
                     return
 
                 async for chunk in self._emit_final_answer(final_state):
@@ -341,9 +333,25 @@ class SSEGraphAdapter:
             logger.exception(f"Graph continuation error: {e}")
             yield self._format_sse({"type": SSEType.ERROR, "message": str(e)})
 
+    # 사용자 입력이 필요한 상태를 등록하고 그 사실을 SSE로 클라이언트에게 알리는 역할 헬퍼
+    async def _handle_clarification(
+        self,
+        invoke_id: str,
+        thread_id: str,
+        final_state: dict,
+        default_message: str,
+    ) -> AsyncGenerator[bytes, None]:
+        """명확화 대기 상태 등록 및 SSE 이벤트 전송"""
+        self._pending_threads[invoke_id] = (thread_id, time.time())
+        clarification = final_state.get("clarification_message", default_message)
+        yield self._format_sse({
+            "type": SSEType.CLARIFICATION,
+            "message": clarification,
+            "thread_id": thread_id
+        })
+
     def _format_sse(self, data: Dict[str, Any]) -> bytes:
         json_str = json.dumps(data, ensure_ascii=False)
         return f"data: {json_str}\n\n".encode("utf-8")
-
 
 sse_graph_adapter = SSEGraphAdapter()

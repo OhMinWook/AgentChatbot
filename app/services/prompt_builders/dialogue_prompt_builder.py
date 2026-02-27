@@ -1,7 +1,7 @@
 """대화록 요약용 프롬프트 빌더 - 날짜별/전체 대화 요약 LLM 요청 payload 생성"""
 
 from typing import Dict, Any, List
-from app.core.config import settings
+from app.services.utils.llm_payload import build_chat_payload
 
 
 class DialoguePromptBuilder:
@@ -69,12 +69,7 @@ class DialoguePromptBuilder:
             {"role": "user", "content": user_content}
         ]
 
-        return {
-            "model": settings.VLLM_MODEL,
-            "messages": messages,
-            "max_tokens": settings.DEFAULT_MAX_TOKENS,
-            "temperature": settings.DEFAULT_TEMPERATURE,
-        }
+        return build_chat_payload(messages)
 
     def build_overall_summary_payload(self, daily_summaries: List[Dict[str, str]]) -> Dict[str, Any]:
         """
@@ -93,12 +88,7 @@ class DialoguePromptBuilder:
             {"role": "user", "content": user_content}
         ]
 
-        return {
-            "model": settings.VLLM_MODEL,
-            "messages": messages,
-            "max_tokens": settings.DEFAULT_MAX_TOKENS,
-            "temperature": settings.DEFAULT_TEMPERATURE,
-        }
+        return build_chat_payload(messages)
 
 
 # 싱글톤 인스턴스

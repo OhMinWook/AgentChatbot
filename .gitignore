@@ -10,3 +10,4 @@ libs
 *.m4a
 *.pdf
 CLAUDE.md
+.env

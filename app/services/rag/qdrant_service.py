@@ -133,6 +133,37 @@ class QdrantService:
         logger.info(f"[Qdrant] Upserted {len(points)} documents (hybrid) for invoke_id={invoke_id}")
         return len(points)
 
+    def _build_filter(self, invoke_id: str, filter_source: Optional[str]) -> models.Filter:
+        """공통 필터 조건 생성 (invoke_id + 파일명 + 글로벌 문서 필터)"""
+        conditions = [
+            models.FieldCondition(
+                key="invoke_id",
+                match=models.MatchValue(value=invoke_id),
+            )
+        ]
+
+        if filter_source:
+            conditions.append(
+                models.FieldCondition(
+                    key="source",
+                    match=models.MatchValue(value=filter_source),
+                )
+            )
+
+        if invoke_id == settings.GLOBAL_INVOKE_ID:
+            conditions.append(
+                models.Filter(
+                    must_not=[
+                        models.FieldCondition(
+                            key="is_use",
+                            match=models.MatchValue(value=False),
+                        )
+                    ]
+                )
+            )
+
+        return models.Filter(must=conditions)
+
     async def search(
         self,
         invoke_id: str,
@@ -153,41 +184,11 @@ class QdrantService:
             SearchResult 리스트 (score 내림차순)
         """
         try:
-            # 필터 조건 구성
-            filter_conditions = [
-                models.FieldCondition(
-                    key="invoke_id",
-                    match=models.MatchValue(value=invoke_id),
-                )
-            ]
-
-            # 파일명 필터 (Private chat)
-            if filter_source:
-                filter_conditions.append(
-                    models.FieldCondition(
-                        key="source",
-                        match=models.MatchValue(value=filter_source),
-                    )
-                )
-
-            # 글로벌 문서: is_use=False만 제외 (True 또는 필드 없음은 통과)
-            if invoke_id == settings.GLOBAL_INVOKE_ID:
-                filter_conditions.append(
-                    models.Filter(
-                        must_not=[
-                            models.FieldCondition(
-                                key="is_use",
-                                match=models.MatchValue(value=False),
-                            )
-                        ]
-                    )
-                )
-
             results = await self.client.query_points(
                 collection_name=settings.QDRANT_COLLECTION,
                 query=query_embedding,
                 using="dense",
-                query_filter=models.Filter(must=filter_conditions),
+                query_filter=self._build_filter(invoke_id, filter_source),
                 limit=top_k,
             )
 
@@ -235,37 +236,7 @@ class QdrantService:
         sparse_weight = 1.0 - dense_weight
 
         try:
-            # 필터 조건 구성
-            filter_conditions = [
-                models.FieldCondition(
-                    key="invoke_id",
-                    match=models.MatchValue(value=invoke_id),
-                )
-            ]
-
-            # 파일명 필터 (Private chat)
-            if filter_source:
-                filter_conditions.append(
-                    models.FieldCondition(
-                        key="source",
-                        match=models.MatchValue(value=filter_source),
-                    )
-                )
-
-            # 글로벌 문서: is_use=False만 제외
-            if invoke_id == settings.GLOBAL_INVOKE_ID:
-                filter_conditions.append(
-                    models.Filter(
-                        must_not=[
-                            models.FieldCondition(
-                                key="is_use",
-                                match=models.MatchValue(value=False),
-                            )
-                        ]
-                    )
-                )
-
-            query_filter = models.Filter(must=filter_conditions)
+            query_filter = self._build_filter(invoke_id, filter_source)
 
             # 1. Dense 검색
             dense_results = await self.client.query_points(

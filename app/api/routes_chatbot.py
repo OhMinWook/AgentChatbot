@@ -13,23 +13,22 @@ from app.services.utils.sse_utils import create_sse_data, create_sse_response, S
 from app.services.rag.rag_ingestion_service import rag_ingestion_service
 from app.services.chat_agent.sse_adapter import sse_graph_adapter
 from app.services.chat_agent.nodes import stream_llm_tokens
-from app.services.api_clients.llm_client import llm_client
-from app.services.prompt_builders.document_summary_prompt_builder import document_summary_prompt_builder
 from app.services.chat_agent.tools import create_search_tool
+from app.services.chat_agent.document_summary_service import document_summary_service
 from app.services.rag.qdrant_service import qdrant_service
 
 router = APIRouter()
 
 
 async def _stream_chat_response(
-    generator, 
-    invoke_id: str, 
-    trigger_message: str, 
+    generator,
+    invoke_id: str,
+    trigger_message: str,
     history_label: str = ""
 ):
     """공통 SSE 스트리밍 및 히스토리 저장 헬퍼"""
     full_answer = ""
-    
+
     async for chunk in generator:
         yield chunk
 
@@ -110,7 +109,7 @@ async def upload_document(
                     await queue.put(create_sse_data({"type": SSEType.DONE, "message": "문서 등록이 완료되었습니다."}))
                 except Exception as e:
                     logger.error(f"[Upload Stream Error] {e}")
-                    await queue.put(create_sse_data({"type": SSEType.ERROR, "detail": str(e)}))
+                    await queue.put(create_sse_data({"type": SSEType.ERROR, "detail": "파일 처리 중 오류가 발생했습니다."}))
                 finally:
                     # 종료 신호
                     await queue.put(None)
@@ -132,7 +131,7 @@ async def upload_document(
 
     except Exception as e:
         logger.error(f"[Upload Failed] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="파일 업로드 중 오류가 발생했습니다.")
 
 
 @router.post("/message/private/{invokeId}", summary="특정 문서 지정 대화 (Private Search)")
@@ -143,20 +142,20 @@ async def send_private_message(
 ):
     """
     특정 파일 내에서만 정보를 검색하여 답변합니다 (Pinpoint Search).
-    
+
     - **target_filename**: 반드시 정확한 파일명을 입력해야 합니다. (예: `manual.pdf`)
     - 해당 파일이 없거나 내용이 없으면 답변하지 못할 수 있습니다.
     """
     try:
         # SSE 생성기 생성
         generator = sse_graph_adapter.invoke_with_sse(invokeId, message, filter_filename=target_filename)
-        
+
         # 공통 헬퍼로 스트리밍 반환
         return create_sse_response(_stream_chat_response(generator, invokeId, message, "Private"))
 
     except Exception as e:
         logger.error(f"[Private Message Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="요청 처리 중 오류가 발생했습니다.")
 
 
 @router.post("/message/open/{invokeId}", summary="전체 문서 대화 (Global Search)")
@@ -170,13 +169,13 @@ async def send_open_message(
     try:
         # SSE 생성기 생성
         generator = sse_graph_adapter.invoke_with_sse(invokeId, message, filter_filename=None)
-        
+
         # 공통 헬퍼로 스트리밍 반환
         return create_sse_response(_stream_chat_response(generator, invokeId, message, "Open"))
 
     except Exception as e:
         logger.error(f"[Open Message Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="요청 처리 중 오류가 발생했습니다.")
 
 
 @router.post("/message/{invokeId}/continue", summary="Human-in-the-loop 계속")
@@ -200,13 +199,13 @@ async def continue_conversation(
     try:
         # SSE 생성기 생성
         generator = sse_graph_adapter.continue_with_sse(invokeId, thread_id, response)
-        
+
         # 공통 헬퍼로 스트리밍 반환
         return create_sse_response(_stream_chat_response(generator, invokeId, response, "Continue"))
 
     except Exception as e:
         logger.error(f"[Continue Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="요청 처리 중 오류가 발생했습니다.")
 
 
 @router.get("/files/{invokeId}", summary="업로드된 파일 목록 조회")
@@ -225,7 +224,7 @@ async def get_uploaded_files(invokeId: str):
 
     except Exception as e:
         logger.error(f"[File List Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="파일 목록 조회 중 오류가 발생했습니다.")
 
 
 @router.get("/history/{invokeId}", summary="대화 기록 조회")
@@ -251,7 +250,7 @@ async def get_chat_history(invokeId: str):
         }
     except Exception as e:
         logger.error(f"[History Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="대화 기록 조회 중 오류가 발생했습니다.")
 
 
 @router.post("/message/document-summary/{invokeId}", summary="문서 체계적 요약 (SSE)")
@@ -267,162 +266,76 @@ async def summarize_document(
 
     SSE를 통해 실시간 진행률을 전송합니다.
     """
-    # 청크 수 기준 대용량 문서 임계값 (약 20페이지 * 5청크)
     LARGE_DOC_CHUNK_THRESHOLD = 100
 
     async def event_stream():
-        try:
-            # 1. 문서 정보 조회 (Qdrant에서 청크 수 확인)
-            yield create_sse_data({"type": SSEType.PROGRESS, "percent": 5, "message": "문서 정보 확인 중..."})
+        queue = asyncio.Queue()
+        result_holder = {"payload": None, "refs": [], "error": None}
 
-            doc_list = await qdrant_service.get_document_list(invokeId)
-            doc_info = next((d for d in doc_list if d["file_name"] == target_filename), None)
+        async def on_progress(percent: int, message: str):
+            await queue.put(create_sse_data({"type": SSEType.PROGRESS, "percent": percent, "message": message}))
 
-            if not doc_info:
-                yield create_sse_data({"type": SSEType.ERROR, "detail": f"문서를 찾을 수 없습니다: {target_filename}"})
-                return
+        async def run():
+            try:
+                await on_progress(5, "문서 정보 확인 중...")
 
-            total_chunks = doc_info["total_chunks"]
-            search_tool = create_search_tool(invokeId)
+                doc_list = await qdrant_service.get_document_list(invokeId)
+                doc_info = next((d for d in doc_list if d["file_name"] == target_filename), None)
 
-            # 2. 청크 수에 따른 방식 분기
-            if total_chunks >= LARGE_DOC_CHUNK_THRESHOLD:
-                # ===== 대용량 문서: 질문 분해 방식 =====
-                questions = document_summary_prompt_builder.get_questions()
-
-                yield create_sse_data({
-                    "type": SSEType.PROGRESS,
-                    "percent": 10,
-                    "message": "문서 내용을 분석하고 있습니다"
-                })
-
-                # 배치 검색 (Qdrant + Reranker)
-                yield create_sse_data({
-                    "type": SSEType.PROGRESS,
-                    "percent": 20,
-                    "message": "관련 문서 검색 중..."
-                })
-
-                query_texts = [q["question"] for q in questions]
-                batch_results = await search_tool.search_batch(
-                    query_texts, top_k=settings.SEARCH_TOP_K, filter_filename=target_filename
-                )
-
-                # LLM 병렬 호출 준비
-                yield create_sse_data({
-                    "type": SSEType.PROGRESS,
-                    "percent": 40,
-                    "message": "문서 내용을 정리하고 있습니다"
-                })
-
-                all_references = []
-                llm_tasks = []
-
-                for i, q in enumerate(questions):
-                    search_result = batch_results[i] if i < len(batch_results) else {"results": [], "references": []}
-                    filtered_chunks = search_result.get("results", [])
-                    refs = search_result.get("references", [])
-
-                    for ref in refs:
-                        if ref not in all_references:
-                            all_references.append(ref)
-
-                    if filtered_chunks:
-                        context = "\n\n---\n\n".join([c.get("content", "") for c in filtered_chunks])
-                        payload = document_summary_prompt_builder.build_qa_payload(q["question"], context)
-                        llm_tasks.append((q["key"], llm_client.chat_completions(payload)))
-                    else:
-                        llm_tasks.append((q["key"], None))
-
-                # LLM 병렬 실행
-                qa_results = {}
-                async_tasks = [task for key, task in llm_tasks if task is not None]
-                task_keys = [key for key, task in llm_tasks if task is not None]
-
-                if async_tasks:
-                    responses = await asyncio.gather(*async_tasks, return_exceptions=True)
-                    for key, response in zip(task_keys, responses):
-                        if isinstance(response, Exception):
-                            logger.error(f"LLM 호출 실패 ({key}): {response}")
-                            qa_results[key] = "분석 실패"
-                        else:
-                            qa_results[key] = llm_client.extract_content(response)
-
-                for key, task in llm_tasks:
-                    if task is None:
-                        qa_results[key] = "해당 정보 없음"
-
-                # 최종 통합
-                yield create_sse_data({
-                    "type": SSEType.PROGRESS,
-                    "percent": 85,
-                    "message": "요약을 작성하고 있습니다"
-                })
-
-                merge_payload = document_summary_prompt_builder.build_merge_payload(qa_results, target_filename)
-
-                # 레퍼런스 전송
-                if all_references:
-                    all_references.sort(key=lambda x: x.get("page", 0))
-                    yield create_sse_data({"type": SSEType.REFERENCES, "docs": all_references})
-
-                # 진짜 스트리밍
-                async for token in stream_llm_tokens(
-                    merge_payload["messages"],
-                    merge_payload.get("max_tokens", settings.DEFAULT_MAX_TOKENS)
-                ):
-                    yield create_sse_data({"type": SSEType.ANSWER, "content": token})
-
-                yield create_sse_data({"type": SSEType.DONE})
-                return
-
-            else:
-                # ===== 소형 문서: 단순 검색 방식 =====
-                yield create_sse_data({
-                    "type": SSEType.PROGRESS,
-                    "percent": 20,
-                    "message": "문서 내용을 검색하고 있습니다"
-                })
-
-                # 단일 검색 (Qdrant + Reranker)
-                search_query = f"{target_filename} 요약"
-                search_result = await search_tool.search(
-                    search_query, top_k=settings.SEARCH_TOP_K, filter_filename=target_filename
-                )
-
-                filtered_chunks = search_result.get("results", [])
-                all_references = search_result.get("references", [])
-
-                if not filtered_chunks:
-                    yield create_sse_data({"type": SSEType.ERROR, "detail": "문서 내용을 찾을 수 없습니다."})
+                if not doc_info:
+                    result_holder["error"] = f"문서를 찾을 수 없습니다: {target_filename}"
                     return
 
-                context = "\n\n---\n\n".join([c.get("content", "") for c in filtered_chunks])
+                search_tool = create_search_tool(invokeId)
 
-                yield create_sse_data({
-                    "type": SSEType.PROGRESS,
-                    "percent": 50,
-                    "message": "요약 생성 중..."
-                })
+                if doc_info["total_chunks"] >= LARGE_DOC_CHUNK_THRESHOLD:
+                    payload, refs = await document_summary_service.summarize_large(
+                        search_tool, target_filename, on_progress
+                    )
+                else:
+                    payload, refs = await document_summary_service.summarize_small(
+                        search_tool, target_filename, on_progress
+                    )
+                    if payload is None:
+                        result_holder["error"] = "문서 내용을 찾을 수 없습니다."
+                        return
 
-                payload = document_summary_prompt_builder.build_simple_summary_payload(context, target_filename)
+                result_holder["payload"] = payload
+                result_holder["refs"] = refs
 
-                # 레퍼런스 전송
-                if all_references:
-                    all_references.sort(key=lambda x: x.get("page", 0))
-                    yield create_sse_data({"type": SSEType.REFERENCES, "docs": all_references})
+            except Exception as e:
+                logger.error(f"[Document Summary Error] {e}")
+                result_holder["error"] = "문서 요약 중 오류가 발생했습니다."
+            finally:
+                await queue.put(None)
 
-                # 진짜 스트리밍
-                async for token in stream_llm_tokens(
-                    payload["messages"],
-                    payload.get("max_tokens", settings.DEFAULT_MAX_TOKENS)
-                ):
-                    yield create_sse_data({"type": SSEType.ANSWER, "content": token})
+        task = asyncio.create_task(run())
 
-                yield create_sse_data({"type": SSEType.DONE})
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield item
 
-        except Exception as e:
-            logger.error(f"[Document Summary Error] {e}")
-            yield create_sse_data({"type": SSEType.ERROR, "detail": str(e)})
+        await task
+
+        if result_holder["error"]:
+            yield create_sse_data({"type": SSEType.ERROR, "detail": result_holder["error"]})
+            return
+
+        payload = result_holder["payload"]
+        refs = result_holder["refs"]
+
+        if refs:
+            refs.sort(key=lambda x: x.get("page", 0))
+            yield create_sse_data({"type": SSEType.REFERENCES, "docs": refs})
+
+        async for token in stream_llm_tokens(
+            payload["messages"],
+            payload.get("max_tokens", settings.DEFAULT_MAX_TOKENS)
+        ):
+            yield create_sse_data({"type": SSEType.ANSWER, "content": token})
+
+        yield create_sse_data({"type": SSEType.DONE})
 
     return create_sse_response(event_stream())

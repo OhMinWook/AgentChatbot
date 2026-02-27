@@ -5,9 +5,8 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from pathlib import Path
 
-import redis
-
 from app.core.config import settings
+from app.core.redis_client import sync_redis
 
 
 class DownloadService:
@@ -23,11 +22,7 @@ class DownloadService:
     TOKEN_PREFIX = "download_token:"
 
     def __init__(self):
-        self.redis = redis.Redis(
-            host=settings.REDIS_HOST,
-            port=settings.REDIS_PORT,
-            decode_responses=True
-        )
+        self.redis = sync_redis
         # 다운로드 디렉토리 생성
         self.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 

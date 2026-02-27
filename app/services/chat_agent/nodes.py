@@ -2,13 +2,14 @@
 LangGraph 노드 함수 정의
 """
 
+import asyncio
 import json
 import logging
 from typing import Dict, Any, List, AsyncGenerator
 
 from langchain_core.messages import HumanMessage, AIMessage
 
-from app.services.chat_agent.graph_state import MainState, AgentSubState
+from app.services.chat_agent.graph_state import MainState
 from app.services.chat_agent.prompts import (
     ANALYZE_REWRITE,
     AGENT,
@@ -18,26 +19,28 @@ from app.services.chat_agent.prompts import (
 from app.services.chat_agent.tools import create_search_tool
 from app.services.api_clients.llm_client import llm_client
 from app.core.config import settings
+from app.services.utils.llm_payload import build_chat_payload
 
 logger = logging.getLogger(__name__)
+
+_ANALYZE_REWRITE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_clear": {"type": "boolean"},
+        "clarification_message": {"type": "string"},
+        "rewritten_questions": {
+            "type": "array",
+            "items": {"type": "string"}
+        },
+    },
+    "required": ["is_clear", "rewritten_questions"]
+}
 
 
 async def _call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json_schema: Dict = None) -> str:
     """LLM 호출 헬퍼 함수"""
     try:
-        payload = {
-            "model": settings.VLLM_MODEL,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": settings.DEFAULT_TEMPERATURE
-        }
-
-        # vLLM structured_outputs (JSON 양식 고정)
-        if json_schema:
-            payload["extra_body"] = {
-                "structured_outputs": {"json": json_schema}
-            }
-
+        payload = build_chat_payload(messages, max_tokens=max_tokens, json_schema=json_schema)
         response = await llm_client.chat_completions(payload)
         content = llm_client.extract_content(response)
         return content.strip()
@@ -66,28 +69,13 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
 
     logger.info(f"[Analyze] 쿼리 분석 시작: {query_for_analysis[:100]}...")
 
-    # JSON 스키마로 구조화된 응답 요청
-    json_schema = {
-        "type": "object",
-        "properties": {
-            "is_clear": {"type": "boolean"},
-            "clarification_message": {"type": "string"},
-            "rewritten_questions": {
-                "type": "array",
-                "items": {"type": "string"}
-            },
-            "reasoning": {"type": "string"}
-        },
-        "required": ["is_clear", "rewritten_questions"]
-    }
-
     response = await _call_llm(
         [
             {"role": "system", "content": ANALYZE_REWRITE.system},
             {"role": "user", "content": ANALYZE_REWRITE.user.format(user_query=query_for_analysis)}
         ],
-        max_tokens=1024,
-        json_schema=json_schema
+        max_tokens=512,
+        json_schema=_ANALYZE_REWRITE_JSON_SCHEMA
     )
 
     logger.debug(f"[Analyze] LLM 응답: {response[:500] if response else '(빈 응답)'}")
@@ -119,6 +107,22 @@ async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
         is_clear = result.get("is_clear", True)
         rewritten_questions = result.get("rewritten_questions", [original_query])
         clarification_message = result.get("clarification_message", DEFAULT_CLARIFICATION_MESSAGE)
+
+        # private chat: 같은 문서에서만 검색하므로 질문 분리 최대 2개로 제한
+        if filter_filename and len(rewritten_questions) > 2:
+            rewritten_questions = rewritten_questions[:2]
+            logger.info(f"[Analyze] Private chat: 질문 2개로 제한")
+
+        # private chat: 재작성된 질문에 파일명이 포함된 경우 제거 (후처리 보완)
+        if filter_filename:
+            file_label = filter_filename.rsplit(".", 1)[0]
+            cleaned = []
+            for q in rewritten_questions:
+                if file_label in q:
+                    q = q.replace(file_label, "").strip().lstrip("의은는이가에서 ").strip()
+                    logger.debug(f"[Analyze] 파일명 제거 후: {q}")
+                cleaned.append(q)
+            rewritten_questions = cleaned
 
         # 쿼리 분석 결과 로깅
         logger.info(f"[Analyze] 원본 쿼리: {original_query}")
@@ -168,8 +172,6 @@ async def human_input_node(state: MainState) -> Dict[str, Any]:
 
 async def process_question_node(state: MainState) -> Dict[str, Any]:
     """질문 처리 노드 - 문서 검색 기반 답변 생성"""
-    import asyncio
-
     invoke_id = state.get("invoke_id", "")
     rewritten_questions = state.get("rewritten_questions", [])
     original_query = state.get("original_query", "")
@@ -319,12 +321,7 @@ async def aggregate_node(state: MainState) -> Dict[str, Any]:
 
 async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 2048) -> AsyncGenerator[str, None]:
     """vLLM SSE 스트리밍 응답을 토큰 단위로 yield하는 async generator"""
-    payload = {
-        "model": settings.VLLM_MODEL,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": settings.DEFAULT_TEMPERATURE
-    }
+    payload = build_chat_payload(messages, max_tokens=max_tokens)
 
     logger.info(f"[LLM Stream] 요청 시작 (max_tokens={max_tokens})")
     token_count = 0

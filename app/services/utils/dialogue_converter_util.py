@@ -26,6 +26,32 @@ def clean_content(content: str, original_filename: str) -> tuple[str, bool]:
 
     return content.strip(), is_attachment
 
+def _parse_formatted_date(formatted_date: str) -> tuple[str, str]:
+    """날짜 문자열에서 (date_only, time_only) 파싱 (두 가지 포맷 지원)
+
+    - 컴팩트: YYYYMMDDHHmmss[SSS] (숫자만, 14자 이상)
+    - ISO:    YYYY-MM-DD[ HH:mm:ss]
+    """
+    if not formatted_date:
+        return '', ''
+
+    # 컴팩트 포맷: 숫자만 14자 이상
+    if re.match(r'^\d{14,}$', formatted_date):
+        return (
+            f"{formatted_date[0:4]}-{formatted_date[4:6]}-{formatted_date[6:8]}",
+            f"{formatted_date[8:10]}:{formatted_date[10:12]}:{formatted_date[12:14]}"
+        )
+
+    # ISO 포맷: YYYY-MM-DD 또는 YYYY-MM-DD HH:mm:ss
+    m = re.match(r'^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}):(\d{2}))?', formatted_date)
+    if m:
+        date_only = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        time_only = f"{m.group(4)}:{m.group(5)}:{m.group(6)}" if m.group(4) else ''
+        return date_only, time_only
+
+    return '', ''
+
+
 def convert_csv_to_dialogue(csv_content: bytes) -> str:
     """
     CSV 파일 내용을 대화록 형식으로 변환합니다.
@@ -87,18 +113,7 @@ def convert_csv_to_dialogue(csv_content: bytes) -> str:
         if not cleaned_content:
             continue
 
-        # 날짜 포맷: 20260120124030008 (YYYYMMDDHHmmssSSS)
-        date_only = ''
-        time_only = ''
-        if formatted_date and len(formatted_date) >= 14:
-            year = formatted_date[0:4]
-            month = formatted_date[4:6]
-            day = formatted_date[6:8]
-            hour = formatted_date[8:10]
-            minute = formatted_date[10:12]
-            second = formatted_date[12:14]
-            date_only = f"{year}-{month}-{day}"
-            time_only = f"{hour}:{minute}:{second}"
+        date_only, time_only = _parse_formatted_date(formatted_date)
 
         if date_only and date_only != current_date:
             flush_message()

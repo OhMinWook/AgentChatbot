@@ -22,10 +22,13 @@ markitdown[all]==0.1.4         # Office/텍스트 파일 → 마크다운 변환
 pdf4llm==0.2.9                 # PDF → 마크다운 변환 (페이지 단위)
 
 # 6. Audio Processing
-pydub==1.25.1                  # 오디오 파일 처리 (STT 전처리)
+pydub==0.25.1                  # 오디오 파일 처리 (STT 전처리)
 
 # 7. Tokenizer
 tiktoken==0.12.0               # 토큰 수 측정 (긴 텍스트 청크 분할용)
 
 # 8. Type Hints
 typing_extensions==4.15.0      # TypedDict 등 확장 타입
+
+# 9. Windows HWP Processing
+pywin32                        # HWP → PDF 변환 (win32com, pythoncom)

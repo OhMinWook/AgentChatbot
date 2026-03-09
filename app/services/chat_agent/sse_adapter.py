@@ -66,6 +66,19 @@ class SSEGraphAdapter:
                 logger.info(f"[HITL] 만료 세션 정리: {thread_id} (invokeId: {invoke_id})")
 
     # ------------------------------------------------------------------
+    # 마크다운 정규화
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_markdown(text: str) -> str:
+        import re
+        text = re.sub(r"^-{3,}$", "", text, flags=re.MULTILINE)  # --- 제거
+        text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)  # 헤더 # 제거
+        text = re.sub(r"\*+", "", text)  # ** 전부 제거
+        text = re.sub(r"\n{3,}", "\n\n", text)  # 연속 빈 줄 → 최대 1줄
+        text = text.strip()
+        return text
+
+    # ------------------------------------------------------------------
     # 토큰 스트리밍 헬퍼
     # ------------------------------------------------------------------
     async def _stream_answer_tokens(
@@ -73,17 +86,19 @@ class SSEGraphAdapter:
     ) -> AsyncGenerator[bytes, None]:
         """streaming_payload를 기반으로 answer 이벤트를 청크 단위로 전송"""
         if streaming_payload.get("precomputed"):
-            # 단일 답변: 이미 완성된 텍스트를 작은 청크로 나눠서 스트리밍 효과
-            content = streaming_payload.get("content", "")
+            content = self._normalize_markdown(streaming_payload.get("content", ""))
             for i in range(0, len(content), _CHUNK_SIZE):
-                chunk = content[i:i + _CHUNK_SIZE]
-                yield self._format_sse({"type": SSEType.ANSWER, "content": chunk})
+                yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
         else:
-            # 복수 답변: vLLM SSE 스트리밍으로 실시간 토큰 전송
+            # 전체 토큰 수집 후 정규화하여 전송
             messages = streaming_payload.get("messages", [])
             max_tokens = streaming_payload.get("max_tokens", 2048)
+            full_text = ""
             async for token in stream_llm_tokens(messages, max_tokens):
-                yield self._format_sse({"type": SSEType.ANSWER, "content": token})
+                full_text += token
+            content = self._normalize_markdown(full_text)
+            for i in range(0, len(content), _CHUNK_SIZE):
+                yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
 
     # ------------------------------------------------------------------
     # 파일 경로 해석 유틸리티

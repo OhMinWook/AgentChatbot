@@ -329,6 +329,8 @@ async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 20
     try:
         stream = await llm_client.chat_completions_stream(payload)
         buffer = ""
+        think_buffer = ""   # <think> 블록 누적 버퍼
+        in_think = False    # <think> 블록 내부 여부
         async for raw_chunk in stream:
             buffer += raw_chunk.decode("utf-8", errors="replace")
             # SSE 라인 단위로 파싱
@@ -349,8 +351,32 @@ async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 20
                     finish_reason = choice.get("finish_reason")
 
                     if token:
-                        token_count += 1
-                        yield token
+                        # <think> 블록 필터링
+                        think_buffer += token
+                        while True:
+                            if in_think:
+                                end_idx = think_buffer.find("</think>")
+                                if end_idx != -1:
+                                    in_think = False
+                                    think_buffer = think_buffer[end_idx + len("</think>"):]
+                                else:
+                                    think_buffer = ""
+                                    break
+                            else:
+                                start_idx = think_buffer.find("<think>")
+                                if start_idx != -1:
+                                    visible = think_buffer[:start_idx]
+                                    if visible:
+                                        token_count += 1
+                                        yield visible
+                                    in_think = True
+                                    think_buffer = think_buffer[start_idx + len("<think>"):]
+                                else:
+                                    if think_buffer:
+                                        token_count += 1
+                                        yield think_buffer
+                                    think_buffer = ""
+                                    break
 
                     # finish_reason 로깅 (stop: 정상종료, length: 토큰부족)
                     if finish_reason:

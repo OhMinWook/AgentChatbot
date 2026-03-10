@@ -15,7 +15,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from app.core.config import settings
 from app.services.chat_agent.graph import create_rag_graph
-from app.services.chat_agent.nodes import stream_llm_tokens
+from app.services.chat_agent.node_utils import stream_llm_tokens
 from app.services.rag.qdrant_service import qdrant_service
 from app.services.utils.download_service import download_service
 from app.services.utils.sse_utils import SSEType

@@ -11,11 +11,13 @@ from app.services.chat_agent.nodes import (
     analyze_rewrite_node,
     human_input_node,
     process_question_node,
+    verify_answer_node,
     aggregate_node
 )
 from app.services.chat_agent.edges import (
     route_after_analyze,
     route_after_human_input,
+    route_after_verify,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,7 @@ def create_rag_graph(checkpointer=None):
     builder.add_node("analyze_rewrite", analyze_rewrite_node)
     builder.add_node("human_input", human_input_node)
     builder.add_node("process_question", process_question_node)
+    builder.add_node("verify_answer", verify_answer_node)
     builder.add_node("aggregate", aggregate_node)
 
     # 엣지 연결
@@ -53,8 +56,16 @@ def create_rag_graph(checkpointer=None):
         }
     )
 
-    # process_question → aggregate → END
-    builder.add_edge("process_question", "aggregate")
+    # process_question → verify_answer → [retry: process_question | pass: aggregate] → END
+    builder.add_edge("process_question", "verify_answer")
+    builder.add_conditional_edges(
+        "verify_answer",
+        route_after_verify,
+        {
+            "retry": "process_question",
+            "aggregate": "aggregate"
+        }
+    )
     builder.add_edge("aggregate", END)
 
     if checkpointer is None:

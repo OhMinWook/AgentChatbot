@@ -26,6 +26,9 @@ class MainState(MessagesState):
     clarification_count: int = 0  # 명확화 요청 횟수
     filter_filename: Optional[str] = None  # 특정 파일 검색 필터
     streaming_payload: Optional[dict] = None  # SSE adapter에서 스트리밍 생성에 사용
+    # 할루시네이션 검증
+    verification_passed: Optional[bool] = None  # None=미검증, True=통과, False=실패
+    retry_count: int = 0  # 검증 실패 후 재시도 횟수
 
 
 class AgentSubState(TypedDict):

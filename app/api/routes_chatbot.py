@@ -12,7 +12,7 @@ from app.services.utils.file_utils import save_upload_file
 from app.services.utils.sse_utils import create_sse_data, create_sse_response, SSEType
 from app.services.rag.rag_ingestion_service import rag_ingestion_service
 from app.services.chat_agent.sse_adapter import sse_graph_adapter
-from app.services.chat_agent.nodes import stream_llm_tokens
+from app.services.chat_agent.node_utils import stream_llm_tokens
 from app.services.chat_agent.tools import create_search_tool
 from app.services.chat_agent.document_summary_service import document_summary_service
 from app.services.rag.qdrant_service import qdrant_service

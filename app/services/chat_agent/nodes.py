@@ -3,23 +3,19 @@ LangGraph 노드 함수 정의
 """
 
 import asyncio
-import json
 import logging
-from typing import Dict, Any, List
+import time
+from typing import Dict, Any
 
 from langchain_core.messages import HumanMessage, AIMessage
 
 from app.services.chat_agent.graph_state import MainState
 from app.services.chat_agent.prompts import (
-    ANALYZE_REWRITE,
     AGENT,
     AGENT_STRICT,
-    AGGREGATE,
     VERIFY_ANSWER,
-    DEFAULT_CLARIFICATION_MESSAGE,
 )
 from app.services.chat_agent.node_utils import (
-    ANALYZE_REWRITE_JSON_SCHEMA,
     VERIFY_ANSWER_JSON_SCHEMA,
     MAX_VERIFY_RETRIES,
     strip_markdown_codeblock,
@@ -33,103 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 # ── analyze_rewrite ───────────────────────────────────────────────────────────
-
-async def analyze_rewrite_node(state: MainState) -> Dict[str, Any]:
-    """쿼리 분석 및 재작성 노드"""
-    messages = state.get("messages", [])
-    filter_filename = state.get("filter_filename", None)
-
-    original_query = ""
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
-            original_query = msg.content
-            break
-
-    query_for_analysis = original_query
-    if filter_filename:
-        file_label = filter_filename.rsplit(".", 1)[0]
-        query_for_analysis = f"[문서: {file_label}] {original_query}"
-
-    logger.info(f"[Analyze] 쿼리 분석 시작: {query_for_analysis[:100]}...")
-
-    response = await call_llm(
-        [
-            {"role": "system", "content": ANALYZE_REWRITE.system},
-            {"role": "user", "content": ANALYZE_REWRITE.user.format(user_query=query_for_analysis)}
-        ],
-        max_tokens=512,
-        json_schema=ANALYZE_REWRITE_JSON_SCHEMA
-    )
-
-    logger.debug(f"[Analyze] LLM 응답: {response[:500] if response else '(빈 응답)'}")
-
-    if not response:
-        logger.warning("LLM returned empty response, using original query")
-        return {
-            "question_is_clear": True,
-            "rewritten_questions": [original_query],
-            "clarification_message": None
-        }
-
-    clarification_count = state.get("clarification_count", 0)
-
-    try:
-        result = json.loads(strip_markdown_codeblock(response))
-        is_clear = result.get("is_clear", True)
-        rewritten_questions = result.get("rewritten_questions", [original_query])
-        clarification_message = result.get("clarification_message", DEFAULT_CLARIFICATION_MESSAGE)
-
-        if filter_filename and len(rewritten_questions) > 2:
-            rewritten_questions = rewritten_questions[:2]
-            logger.info("[Analyze] Private chat: 질문 2개로 제한")
-
-        if filter_filename:
-            file_label = filter_filename.rsplit(".", 1)[0]
-            cleaned = []
-            for q in rewritten_questions:
-                if file_label in q:
-                    q = q.replace(file_label, "").strip().lstrip("의은는이가에서 ").strip()
-                    logger.debug(f"[Analyze] 파일명 제거 후: {q}")
-                cleaned.append(q)
-            rewritten_questions = cleaned
-
-        logger.info(f"[Analyze] 원본 쿼리: {original_query}")
-        logger.info(f"[Analyze] 재작성 ({len(rewritten_questions)}개): {rewritten_questions}")
-
-        if not is_clear and clarification_count >= 2:
-            logger.info(f"[Analyze] 명확화 횟수 초과 ({clarification_count}회), 강제 진행")
-            is_clear = True
-
-        if not rewritten_questions:
-            rewritten_questions = [original_query]
-
-    except json.JSONDecodeError as e:
-        logger.warning(f"JSON parse failed: {e}, response was: {response[:200]}")
-        is_clear = True
-        rewritten_questions = [original_query]
-        clarification_message = ""
-
-    update = {
-        "original_query": original_query,
-        "question_is_clear": is_clear,
-        "rewritten_questions": rewritten_questions,
-        "clarification_message": clarification_message if not is_clear else None,
-        "awaiting_human_input": not is_clear,
-    }
-    if not is_clear:
-        update["clarification_count"] = clarification_count + 1
-
-    return update
-
-
-# ── human_input ───────────────────────────────────────────────────────────────
-
-async def human_input_node(state: MainState) -> Dict[str, Any]:
-    """Human-in-the-loop 노드 - 사용자 입력 대기"""
-    logger.info("[HumanInput] 사용자 입력 대기 중...")
-    # interrupt_before로 일시 정지, 재개 시 update_state로 awaiting_human_input=False 주입
-    return {}
-
 
 # ── process_question ──────────────────────────────────────────────────────────
 
@@ -151,12 +50,20 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
     logger.info(f"[Process] {len(questions)}개 질문 처리 시작 (인덱스: {search_invoke_id}, 재시도: {retry_count > 0})")
 
     search_tool = create_search_tool(search_invoke_id)
-    search_results = await search_tool.search_batch(questions, filter_filename=filter_filename)
 
+    t0 = time.perf_counter()
+    search_results = await search_tool.search_batch(questions, filter_filename=filter_filename)
+    t1 = time.perf_counter()
+    logger.info(f"[Timing] search_batch ({len(questions)}개): {t1 - t0:.2f}s")
+
+    t2 = time.perf_counter()
     all_results = await asyncio.gather(*[
         generate_single_answer(agent_prompt, idx, questions[idx], search_results[idx], settings.DEFAULT_MAX_TOKENS)
         for idx in range(len(questions))
     ])
+    t3 = time.perf_counter()
+    logger.info(f"[Timing] generate_answers ({len(questions)}개): {t3 - t2:.2f}s")
+
     all_results = sorted(all_results, key=lambda x: x["idx"])
 
     all_answers = [{
@@ -268,23 +175,3 @@ async def aggregate_node(state: MainState) -> Dict[str, Any]:
             "streaming_payload": {"precomputed": True, "content": answer_text}
         }
 
-    answers_text = "".join(
-        f"\n### 답변 {i+1}\n{ans.get('answer', '')}\n"
-        for i, ans in enumerate(agent_answers)
-    )
-    messages = [
-        {"role": "system", "content": AGGREGATE.system},
-        {"role": "user", "content": AGGREGATE.user.format(
-            original_query=original_query, agent_answers=answers_text
-        )}
-    ]
-
-    logger.info("[Aggregate] 복수 답변 통합 스트리밍 준비")
-    return {
-        "messages": [AIMessage(content="")],
-        "streaming_payload": {
-            "precomputed": False,
-            "messages": messages,
-            "max_tokens": settings.DEFAULT_MAX_TOKENS
-        }
-    }

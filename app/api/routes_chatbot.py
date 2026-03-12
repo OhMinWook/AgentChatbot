@@ -178,35 +178,6 @@ async def send_open_message(
         raise HTTPException(status_code=500, detail="요청 처리 중 오류가 발생했습니다.")
 
 
-@router.post("/message/{invokeId}/continue", summary="Human-in-the-loop 계속")
-async def continue_conversation(
-        invokeId: str,
-        thread_id: Optional[str] = Form(None, description="이전 대화 스레드 ID"),
-        response: Optional[str] = Form(None, description="사용자 명확화 응답")
-):
-    """
-    Human-in-the-loop 후 그래프 재개
-
-    clarification_needed 이벤트에서 받은 thread_id와
-    사용자의 명확화 응답을 사용하여 대화를 계속합니다.
-    """
-    logger.info(f"[Continue Request] invokeId: {invokeId}, thread_id: {thread_id}, response: {response}")
-
-    if not thread_id or not response:
-        logger.warning(f"[Continue Validation Failed] Missing thread_id or response")
-        raise HTTPException(status_code=422, detail="thread_id와 response는 필수입니다.")
-
-    try:
-        # SSE 생성기 생성
-        generator = sse_graph_adapter.continue_with_sse(invokeId, thread_id, response)
-
-        # 공통 헬퍼로 스트리밍 반환
-        return create_sse_response(_stream_chat_response(generator, invokeId, response, "Continue"))
-
-    except Exception as e:
-        logger.error(f"[Continue Error] {e}")
-        raise HTTPException(status_code=500, detail="요청 처리 중 오류가 발생했습니다.")
-
 
 @router.get("/files/{invokeId}", summary="업로드된 파일 목록 조회")
 async def get_uploaded_files(invokeId: str):

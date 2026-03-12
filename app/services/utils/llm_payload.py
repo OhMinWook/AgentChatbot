@@ -31,7 +31,7 @@ def build_chat_payload(
         "temperature": temperature if temperature is not None else settings.DEFAULT_TEMPERATURE,
     }
 
-    extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+    extra_body = {"chat_template_kwargs": {"thinking": False}}
 
     if json_schema:
         extra_body["structured_outputs"] = {"json": json_schema}

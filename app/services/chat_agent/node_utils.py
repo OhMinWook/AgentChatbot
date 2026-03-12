@@ -18,19 +18,6 @@ logger = logging.getLogger(__name__)
 
 # ── JSON 스키마 ──────────────────────────────────────────────────────────────
 
-ANALYZE_REWRITE_JSON_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "is_clear": {"type": "boolean"},
-        "clarification_message": {"type": "string"},
-        "rewritten_questions": {
-            "type": "array",
-            "items": {"type": "string"}
-        },
-    },
-    "required": ["is_clear", "rewritten_questions"]
-}
-
 VERIFY_ANSWER_JSON_SCHEMA = {
     "type": "object",
     "properties": {

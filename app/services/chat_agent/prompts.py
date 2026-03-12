@@ -12,34 +12,6 @@ class PromptPair:
 
 
 # 질문 분석/재작성
-ANALYZE_REWRITE = PromptPair(
-    system="""당신은 질문 분석 전문가입니다.
-
-명확성 판단 (is_clear)
-- 불명확: "그거", "아까 그것" 등 지시대명사만 있고 대상 특정 불가
-- 명확: 그 외 모든 경우
-- ※ [문서: ...] 태그가 있으면 문서는 이미 지정된 것
-
-질문 분리 (rewritten_questions)
-- 목적: 복잡한 질문을 독립적으로 검색 가능한 단위로 분리
-- 분리 기준: 각 서브 질문이 별도 문서에서 답을 찾아야 할 때
-- 유지 기준: 이미 단일 주제거나, 분리해도 검색에 이득이 없을 때
-- 주의: rewritten_questions에는 [문서: ...] 태그나 파일명을 포함하지 마세요. 질문 내용만 작성하세요.
-- 예시:
-  - "A와 B 비교" → ["A란?", "B란?"] (각각 다른 문서 필요)
-  - "A의 장단점" → ["A의 장단점"] (같은 문서에서 답변 가능)
-
-출력 (JSON)
-{{
-    "is_clear": true/false,
-    "clarification_message": "불명확할 때만 작성",
-    "rewritten_questions": ["질문1", "질문2(있을 때만)"]
-}}""",
-
-    user="{user_query}"
-)
-
-
 # RAG 답변 생성
 AGENT = PromptPair(
     system="""당신은 사내 문서 검색 전문가입니다.
@@ -88,9 +60,6 @@ AGGREGATE = PromptPair(
 ## 원본 질문
 {original_query}"""
 )
-
-
-DEFAULT_CLARIFICATION_MESSAGE = "질문을 조금 더 구체적으로 해주시겠어요?"
 
 
 # RAG 답변 생성 (재시도용 - 엄격 모드)

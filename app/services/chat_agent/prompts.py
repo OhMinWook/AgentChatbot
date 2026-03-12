@@ -31,7 +31,7 @@ AGENT = PromptPair(
 
     user="""## 질문
 {question}
-    
+
 ## 검색된 문서
 {context}
 

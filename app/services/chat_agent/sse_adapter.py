@@ -37,25 +37,20 @@ class SSEGraphAdapter:
     def _generate_thread_id(self, invoke_id: str) -> str:
         return f"{invoke_id}_{uuid.uuid4().hex[:8]}"
 
+    def cancel_pending(self, invoke_id: str) -> None:
+        """대기 중인 human-in-the-loop 세션 폐기 (현재 MemorySaver 사용으로 별도 처리 불필요)"""
+        pass
+
     # ------------------------------------------------------------------
     # 마크다운 정규화
     # ------------------------------------------------------------------
     @staticmethod
     def _normalize_markdown(text: str) -> str:
-        text = re.sub(r"^-{3,}$", "", text, flags=re.MULTILINE)  # --- 제거
-        text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)  # 헤더 # 제거
-        text = re.sub(r"\*+", "", text)  # ** 전부 제거
-        text = re.sub(r"\n{3,}", "\n\n", text)  # 연속 빈 줄 → 최대 1줄
+        text = re.sub(r"\*+", "", text)  # ** 제거
+        text = re.sub(r"\n{3,}", "\n\n", text)  # 연속 빈 줄 → 최대 2줄
         text = text.strip()
         return text
 
-    @staticmethod
-    def _normalize_line(line: str) -> str:
-        """한 줄에 대해 마크다운 정규화 적용"""
-        line = re.sub(r"^-{3,}$", "", line)    # --- 제거
-        line = re.sub(r"^#{1,6}\s+", "", line)  # 헤더 # 제거
-        line = re.sub(r"\*+", "", line)          # ** 제거
-        return line
 
     # ------------------------------------------------------------------
     # 토큰 스트리밍 헬퍼
@@ -85,48 +80,11 @@ class SSEGraphAdapter:
             messages = streaming_payload.get("messages", [])
             max_tokens = streaming_payload.get("max_tokens", 2048)
 
-            line_buffer = ""
-            consecutive_newlines = 0
-            at_line_start = True
-
             async for token in stream_llm_tokens(messages, max_tokens):
-                line_buffer += token
-
-                while "\n" in line_buffer:
-                    line, line_buffer = line_buffer.split("\n", 1)
-                    normalized = self._normalize_line(line)
-
-                    if normalized.strip() == "":
-                        consecutive_newlines += 1
-                        if consecutive_newlines <= 2:
-                            log_ttft()
-                            yield self._format_sse({"type": SSEType.ANSWER, "content": "\n"})
-                    else:
-                        consecutive_newlines = 0
-                        text_to_send = normalized + "\n"
-                        for i in range(0, len(text_to_send), _CHUNK_SIZE):
-                            log_ttft()
-                            yield self._format_sse({"type": SSEType.ANSWER, "content": text_to_send[i:i + _CHUNK_SIZE]})
-                    at_line_start = True
-
-                # 줄 중간 토큰 즉시 전송 (헤더 줄은 \n 올 때까지 버퍼링)
-                if line_buffer:
-                    is_header = at_line_start and re.match(r'^#{1,6}', line_buffer)
-                    if not is_header:
-                        cleaned = re.sub(r"\*+", "", line_buffer)
-                        if cleaned:
-                            log_ttft()
-                            yield self._format_sse({"type": SSEType.ANSWER, "content": cleaned})
-                        line_buffer = ""
-                        at_line_start = False
-
-            # 마지막 줄 처리 (줄바꿈 없는 마지막 내용)
-            if line_buffer.strip():
-                normalized = self._normalize_line(line_buffer)
-                if normalized:
-                    for i in range(0, len(normalized), _CHUNK_SIZE):
-                        log_ttft()
-                        yield self._format_sse({"type": SSEType.ANSWER, "content": normalized[i:i + _CHUNK_SIZE]})
+                if token:
+                    token = re.sub(r"\*+", "", token)
+                    log_ttft()
+                    yield self._format_sse({"type": SSEType.ANSWER, "content": token})
 
     # ------------------------------------------------------------------
     # 파일 경로 해석 유틸리티

@@ -152,7 +152,7 @@ class CallSummaryPromptBuilder:
 
             # 다음 시작점 (오버랩 적용)
             start = end - settings.CALLSUMMARY_CHUNK_OVERLAP
-            if start >= total_tokens:
+            if start >= total_tokens or end >= total_tokens:
                 break
 
         return chunks

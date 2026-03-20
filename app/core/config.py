@@ -51,6 +51,9 @@ class Settings(BaseModel):
     # [글로벌 문서 설정]
     GLOBAL_INVOKE_ID: str = os.getenv("GLOBAL_INVOKE_ID", "__global__")
 
+    # [ffmpeg 경로]
+    FFMPEG_PATH: str = os.getenv("FFMPEG_PATH", "ffmpeg")
+
     # [타임아웃 설정 (초)]
     LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "180"))
     STT_TIMEOUT: float = float(os.getenv("STT_TIMEOUT", "300"))

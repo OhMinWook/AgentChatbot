@@ -5,6 +5,7 @@ LangGraph 노드 함수 정의
 import asyncio
 import logging
 import time
+import json
 from typing import Dict, Any
 
 from langchain_core.messages import HumanMessage, AIMessage

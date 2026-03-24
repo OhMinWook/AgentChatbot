@@ -25,7 +25,7 @@ class Settings(BaseModel):
     CHAT_HISTORY_TTL: int = 60 * 60 * 24 * 7  # 7일
 
     # [검색 설정]
-    SEARCH_TOP_K: int = 6
+    SEARCH_TOP_K: int = 4
 
     # [청크 설정 - RAG 문서 분할 (문자 기준)]
     CHUNK_SIZE: int = 1000

@@ -15,6 +15,7 @@ qdrant-client==1.16.2          # 벡터 DB (문서 임베딩 저장/검색)
 # 4. LangChain / LangGraph
 langchain-core==1.2.7          # 메시지, 프롬프트, 문서 타입
 langgraph==1.0.6               # LangGraph 에이전트 워크플로우
+langfuse                       # LLM 관찰가능성 (트레이싱/모니터링)
 
 # 5. Document Processing
 jinja2==3.1.6                  # HWPX 문서 템플릿 처리

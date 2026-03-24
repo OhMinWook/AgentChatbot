@@ -51,6 +51,11 @@ class Settings(BaseModel):
     # [글로벌 문서 설정]
     GLOBAL_INVOKE_ID: str = os.getenv("GLOBAL_INVOKE_ID", "__global__")
 
+    # [Langfuse]
+    LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+    LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+
     # [ffmpeg 경로]
     FFMPEG_PATH: str = os.getenv("FFMPEG_PATH", "ffmpeg")
 
@@ -59,5 +64,6 @@ class Settings(BaseModel):
     STT_TIMEOUT: float = float(os.getenv("STT_TIMEOUT", "300"))
     MODEL_SERVER_EMBED_TIMEOUT: float = float(os.getenv("MODEL_SERVER_EMBED_TIMEOUT", "600"))
     MODEL_SERVER_QUERY_TIMEOUT: float = float(os.getenv("MODEL_SERVER_QUERY_TIMEOUT", "30"))
+    SSE_QUEUE_TIMEOUT: float = float(os.getenv("SSE_QUEUE_TIMEOUT", "600"))
 
 settings = Settings()

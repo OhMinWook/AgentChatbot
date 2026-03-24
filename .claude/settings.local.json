@@ -15,7 +15,15 @@
       "Bash(Select-Object -First 10)",
       "Bash(ls -la \"C:\\\\Users\\\\user\\\\PycharmProjects\\\\Model_Server\\\\routers\"\" && ls -la \"C:UsersuserPycharmProjectsModel_Serverservices\"\")",
       "Bash(git checkout:*)",
-      "Bash(git reset:*)"
+      "Bash(git reset:*)",
+      "Bash(cmd /c \"dir C:\\\\AIChatbot\\\\AI_Service\\\\Scripts\\\\\" 2>&1)",
+      "Bash(cmd /c dir C:\\\\AIChatbot\\\\AI_Service\\\\Scripts 2>&1)",
+      "Bash(cmd /c \"C:\\\\AIChatbot\\\\AI_Service\\\\Scripts\\\\python.exe\" -m pytest --version 2>&1)",
+      "Bash(cmd /c \"C:\\\\AIChatbot\\\\AI_Service\\\\Scripts\\\\python.exe --version\")",
+      "Bash(cmd /c \"C:\\\\AIChatbot\\\\AI_Service\\\\Scripts\\\\pytest.exe --version\")",
+      "Bash(cmd /c C:\\\\AIChatbot\\\\AI_Service\\\\Scripts\\\\python.exe --version 2>&1)",
+      "Bash(powershell -Command \"& 'C:\\\\AIChatbot\\\\AI_Service\\\\Scripts\\\\python.exe' --version\" 2>&1)",
+      "Bash(/c/AIChatbot/AI_Service/venv/Scripts/python.exe -m pytest /c/AIChatbot/AI_Service/tests/test_llm_client.py /c/AIChatbot/AI_Service/tests/test_stt_client.py -v --tb=short 2>&1)"
     ]
   }
 }

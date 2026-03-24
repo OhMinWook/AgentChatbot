@@ -105,7 +105,7 @@ class LLMClient(BaseAPIClient):
 
         if r is None:
             logger.error(f"LLM stream request failed after {max_retries + 1} attempts")
-            raise last_error
+            raise last_error or RuntimeError(f"LLM stream request failed after {max_retries + 1} attempts")
 
         async def gen():
             try:

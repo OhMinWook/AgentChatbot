@@ -13,6 +13,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
+from app.core.langfuse_client import langfuse  # noqa: F401 - Langfuse 초기화
 from app.api.routes_health import router as health_router
 from app.api.routes_chatbot import router as chatbot_router
 from app.api.routes_callsummary import router as callsummary_router

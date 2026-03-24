@@ -4,6 +4,7 @@ Qdrant Vector Database Service
 문서 임베딩 저장 및 벡터 검색을 담당합니다.
 """
 
+import asyncio
 import logging
 import uuid
 from typing import List, Dict, Optional, Any
@@ -238,25 +239,25 @@ class QdrantService:
         try:
             query_filter = self._build_filter(invoke_id, filter_source)
 
-            # 1. Dense 검색
-            dense_results = await self.client.query_points(
-                collection_name=settings.QDRANT_COLLECTION,
-                query=dense_embedding,
-                using="dense",
-                query_filter=query_filter,
-                limit=top_k,
-            )
-
-            # 2. Sparse 검색
-            sparse_results = await self.client.query_points(
-                collection_name=settings.QDRANT_COLLECTION,
-                query=models.SparseVector(
-                    indices=sparse_vector["indices"],
-                    values=sparse_vector["values"],
+            # 1. Dense + Sparse 병렬 검색
+            dense_results, sparse_results = await asyncio.gather(
+                self.client.query_points(
+                    collection_name=settings.QDRANT_COLLECTION,
+                    query=dense_embedding,
+                    using="dense",
+                    query_filter=query_filter,
+                    limit=top_k,
                 ),
-                using="sparse",
-                query_filter=query_filter,
-                limit=top_k,
+                self.client.query_points(
+                    collection_name=settings.QDRANT_COLLECTION,
+                    query=models.SparseVector(
+                        indices=sparse_vector["indices"],
+                        values=sparse_vector["values"],
+                    ),
+                    using="sparse",
+                    query_filter=query_filter,
+                    limit=top_k,
+                ),
             )
 
             # 3. Dense는 코사인 유사도(0~1), Sparse만 Min-Max 정규화

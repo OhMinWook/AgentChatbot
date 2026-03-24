@@ -9,6 +9,8 @@ import json
 from typing import Dict, Any
 
 from langchain_core.messages import HumanMessage, AIMessage
+from langfuse.decorators import observe, langfuse_context
+from app.core.langfuse_client import langfuse
 
 from app.services.chat_agent.graph_state import MainState
 from app.services.chat_agent.prompts import (
@@ -33,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 # ── process_question ──────────────────────────────────────────────────────────
 
+@observe()
 async def process_question_node(state: MainState) -> Dict[str, Any]:
     """질문 처리 노드 - 문서 검색 및 답변 생성"""
     invoke_id = state.get("invoke_id", "")
@@ -82,6 +85,7 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
 
 # ── verify_answer ─────────────────────────────────────────────────────────────
 
+@observe()
 async def verify_answer_node(state: MainState) -> Dict[str, Any]:
     """할루시네이션 검증 노드 - 답변이 문서 내용에 근거하는지 판단"""
     agent_answers = state.get("agent_answers", [])
@@ -103,6 +107,7 @@ async def verify_answer_node(state: MainState) -> Dict[str, Any]:
                 {"role": "system", "content": VERIFY_ANSWER.system},
                 {"role": "user", "content": VERIFY_ANSWER.user.format(
                     context=answer.get("context", ""),
+                    question=answer.get("question", ""),
                     answer=answer.get("answer", "")
                 )}
             ],
@@ -127,6 +132,21 @@ async def verify_answer_node(state: MainState) -> Dict[str, Any]:
     results = await asyncio.gather(*[verify_single(a) for a in answers_to_verify])
     failed = [r for r in results if not r["passed"]]
 
+    # Langfuse 스코어 기록
+    try:
+        trace_id = langfuse_context.get_current_trace_id()
+        if trace_id:
+            score_value = 0.0 if failed else 1.0
+            comment = "; ".join(i for r in failed for i in r.get("issues", [])) if failed else "검증 통과"
+            langfuse.score(
+                trace_id=trace_id,
+                name="hallucination_check",
+                value=score_value,
+                comment=comment,
+            )
+    except Exception as e:
+        logger.debug(f"[Verify] Langfuse score 기록 실패 (무시): {e}")
+
     if not failed:
         logger.info("[Verify] 전체 답변 검증 통과")
         return {"verification_passed": True}
@@ -145,6 +165,7 @@ async def verify_answer_node(state: MainState) -> Dict[str, Any]:
 
 # ── aggregate ─────────────────────────────────────────────────────────────────
 
+@observe()
 async def aggregate_node(state: MainState) -> Dict[str, Any]:
     """답변 통합 노드 - streaming_payload 구성"""
     original_query = state.get("original_query", "")

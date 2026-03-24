@@ -119,7 +119,12 @@ async def upload_document(
 
             # 큐 소비 및 스트리밍
             while True:
-                data = await queue.get()
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=settings.SSE_QUEUE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    yield create_sse_data({"type": SSEType.ERROR, "detail": "처리 시간이 초과되었습니다."})
+                    task.cancel()
+                    return
                 if data is None:
                     break
                 yield data
@@ -283,7 +288,12 @@ async def summarize_document(
         task = asyncio.create_task(run())
 
         while True:
-            item = await queue.get()
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=settings.SSE_QUEUE_TIMEOUT)
+            except asyncio.TimeoutError:
+                yield create_sse_data({"type": SSEType.ERROR, "detail": "처리 시간이 초과되었습니다."})
+                task.cancel()
+                return
             if item is None:
                 break
             yield item

@@ -10,6 +10,7 @@ import logging
 import re
 from typing import Dict, List, AsyncGenerator
 
+from langfuse.decorators import observe
 from app.services.api_clients.llm_client import llm_client
 from app.core.config import settings
 from app.services.utils.llm_payload import build_chat_payload
@@ -70,6 +71,7 @@ def strip_markdown_codeblock(text: str) -> str:
     return text
 
 
+@observe()
 async def call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json_schema: Dict = None) -> str:
     """LLM 호출 헬퍼 — think 블록 자동 제거"""
     try:
@@ -95,6 +97,7 @@ def build_agent_messages(agent_prompt, question: str, doc_res: Dict) -> List[Dic
     ]
 
 
+@observe()
 async def generate_single_answer(agent_prompt, idx: int, question: str, doc_res: Dict, max_tokens: int) -> Dict:
     """단일 질문에 대해 검색 결과 기반 답변을 생성한다.
     - 고위험 질문: LLM pre-generate (검증용)
@@ -195,6 +198,7 @@ async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 20
                             logger.warning(f"[LLM Stream] 토큰 제한으로 응답 잘림! max_tokens={max_tokens}")
 
                 except json.JSONDecodeError:
+                    logger.debug(f"[LLM Stream] JSON 파싱 실패 (스킵): {data_str[:100]}")
                     continue
     except Exception as e:
         logger.error(f"[LLM Stream] error: {e}, tokens={token_count}")

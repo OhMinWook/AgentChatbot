@@ -55,8 +55,10 @@ def is_high_risk_question(question: str) -> bool:
 # ── LLM 호출 헬퍼 ─────────────────────────────────────────────────────────────
 
 def strip_think_blocks(text: str) -> str:
-    """<think>...</think> 블록 제거"""
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    """<think>...</think> 블록 제거 (닫힌 태그 없는 경우도 처리)"""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
+    return text.strip()
 
 
 def strip_markdown_codeblock(text: str) -> str:

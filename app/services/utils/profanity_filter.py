@@ -18,7 +18,7 @@ def _load_banned_words() -> list[str]:
         return []
 
     words = []
-    with open(_DATASET_PATH, encoding="utf-8", newline="") as f:
+    with open(_DATASET_PATH, encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
             word = row.get("slang", "").strip()

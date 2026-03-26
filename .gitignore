@@ -11,3 +11,4 @@ libs
 *.pdf
 CLAUDE.md
 .env
+test_ui.html

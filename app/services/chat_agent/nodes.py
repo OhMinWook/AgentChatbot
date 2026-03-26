@@ -53,6 +53,7 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
 
     logger.info(f"[Process] {len(questions)}개 질문 처리 시작 (인덱스: {search_invoke_id}, 재시도: {retry_count > 0})")
 
+    translate_to = state.get("translate_to", None)
     search_tool = create_search_tool(search_invoke_id)
 
     t0 = time.perf_counter()
@@ -62,7 +63,7 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
 
     t2 = time.perf_counter()
     all_results = await asyncio.gather(*[
-        generate_single_answer(agent_prompt, idx, questions[idx], search_results[idx], settings.DEFAULT_MAX_TOKENS)
+        generate_single_answer(agent_prompt, idx, questions[idx], search_results[idx], settings.DEFAULT_MAX_TOKENS, translate_to=translate_to)
         for idx in range(len(questions))
     ])
     t3 = time.perf_counter()
@@ -78,6 +79,37 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
         "sources": r["sources"],
         "rag_docs": r.get("rag_docs", [])
     } for r in all_results]
+
+    # Langfuse reranker_score 기록
+    try:
+        trace_id = langfuse_context.get_current_trace_id()
+        if trace_id:
+            scores = [
+                doc["score"]
+                for ans in all_answers
+                for doc in ans.get("rag_docs", [])
+                if isinstance(doc.get("score"), (int, float))
+            ]
+            if scores:
+                avg_score = sum(scores) / len(scores)
+                langfuse.score(
+                    trace_id=trace_id,
+                    name="reranker_score",
+                    value=round(avg_score, 4),
+                    comment=f"청크 {len(scores)}개 평균"
+                )
+            langfuse.score(
+                trace_id=trace_id,
+                name="rag_doc_count",
+                value=len(scores),
+            )
+            langfuse.score(
+                trace_id=trace_id,
+                name="cache_hit",
+                value=0,
+            )
+    except Exception as e:
+        logger.debug(f"[Process] Langfuse reranker_score 기록 실패 (무시): {e}")
 
     logger.info(f"[Process] {len(all_answers)}개 답변 완료")
     return {"agent_answers": all_answers}

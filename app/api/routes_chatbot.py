@@ -143,17 +143,19 @@ async def upload_document(
 async def send_private_message(
         invokeId: str,
         message: str = Form(..., description="유저 대화 내역"),
-        target_filename: str = Form(..., description="검색할 대상 파일명 (확장자 포함)")
+        target_filename: str = Form(..., description="검색할 대상 파일명 (확장자 포함)"),
+        translate_to: Optional[str] = Form(None, description="번역 언어 코드 (en/zh/ja)")
 ):
     """
     특정 파일 내에서만 정보를 검색하여 답변합니다 (Pinpoint Search).
 
     - **target_filename**: 반드시 정확한 파일명을 입력해야 합니다. (예: `manual.pdf`)
     - 해당 파일이 없거나 내용이 없으면 답변하지 못할 수 있습니다.
+    - **translate_to**: 번역 언어 코드 (en=영어, zh=중국어, ja=일본어). 생략 시 번역 안 함.
     """
     try:
         # SSE 생성기 생성
-        generator = sse_graph_adapter.invoke_with_sse(invokeId, message, filter_filename=target_filename)
+        generator = sse_graph_adapter.invoke_with_sse(invokeId, message, filter_filename=target_filename, translate_to=translate_to)
 
         # 공통 헬퍼로 스트리밍 반환
         return create_sse_response(_stream_chat_response(generator, invokeId, message, "Private"))
@@ -166,14 +168,17 @@ async def send_private_message(
 @router.post("/message/open/{invokeId}", summary="전체 문서 대화 (Global Search)")
 async def send_open_message(
         invokeId: str,
-        message: str = Form(..., description="유저 대화 내역")
+        message: str = Form(..., description="유저 대화 내역"),
+        translate_to: Optional[str] = Form(None, description="번역 언어 코드 (en/zh/ja)")
 ):
     """
     업로드된 모든 문서를 대상으로 정보를 검색하여 답변합니다 (Open/Global Search).
+
+    - **translate_to**: 번역 언어 코드 (en=영어, zh=중국어, ja=일본어). 생략 시 번역 안 함.
     """
     try:
         # SSE 생성기 생성
-        generator = sse_graph_adapter.invoke_with_sse(invokeId, message, filter_filename=None)
+        generator = sse_graph_adapter.invoke_with_sse(invokeId, message, filter_filename=None, translate_to=translate_to)
 
         # 공통 헬퍼로 스트리밍 반환
         return create_sse_response(_stream_chat_response(generator, invokeId, message, "Open"))

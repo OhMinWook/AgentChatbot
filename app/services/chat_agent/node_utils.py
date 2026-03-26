@@ -10,7 +10,7 @@ import logging
 import re
 from typing import Dict, List, AsyncGenerator
 
-from langfuse.decorators import observe
+from langfuse.decorators import observe, langfuse_context
 from app.services.api_clients.llm_client import llm_client
 from app.core.config import settings
 from app.services.utils.llm_payload import build_chat_payload
@@ -99,8 +99,15 @@ def build_agent_messages(agent_prompt, question: str, doc_res: Dict) -> List[Dic
     ]
 
 
+_TRANSLATE_LANG_NAMES = {
+    "en": "English",
+    "zh": "Chinese (Simplified)",
+    "ja": "Japanese",
+}
+
+
 @observe()
-async def generate_single_answer(agent_prompt, idx: int, question: str, doc_res: Dict, max_tokens: int) -> Dict:
+async def generate_single_answer(agent_prompt, idx: int, question: str, doc_res: Dict, max_tokens: int, translate_to: str = None) -> Dict:
     """단일 질문에 대해 검색 결과 기반 답변을 생성한다.
     - 고위험 질문: LLM pre-generate (검증용)
     - 저위험 질문: 스트리밍 준비만 (answer="")
@@ -117,7 +124,12 @@ async def generate_single_answer(agent_prompt, idx: int, question: str, doc_res:
             "context": "", "messages": None, "sources": [], "rag_docs": []
         }
 
+    if translate_to and messages:
+        lang_name = _TRANSLATE_LANG_NAMES.get(translate_to, translate_to)
+        messages[-1]["content"] += f"\n\n[추가 지시] 위 답변을 반드시 한국어로 먼저 작성하고, 빈 줄 하나를 추가한 뒤 {lang_name}로 번역하여 출력하세요."
+
     high_risk = is_high_risk_question(question)
+    langfuse_context.update_current_observation(metadata={"high_risk": high_risk})
     if high_risk:
         logger.info(f"[Process] 고위험 질문 - pre-generate: {question[:50]}")
         answer = await call_llm(messages, max_tokens=max_tokens)

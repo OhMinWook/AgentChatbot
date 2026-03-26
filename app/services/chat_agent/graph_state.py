@@ -21,6 +21,7 @@ class MainState(MessagesState):
     rewritten_questions: List[str] = []
     agent_answers: Annotated[List[dict], accumulate_or_reset] = []
     filter_filename: Optional[str] = None  # 특정 파일 검색 필터
+    translate_to: Optional[str] = None  # 번역 언어 코드 (en/zh/ja), None이면 번역 없음
     streaming_payload: Optional[dict] = None  # SSE adapter에서 스트리밍 생성에 사용
     # 할루시네이션 검증
     verification_passed: Optional[bool] = None  # None=미검증, True=통과, False=실패

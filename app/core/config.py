@@ -24,12 +24,16 @@ class Settings(BaseModel):
     # [대화 설정]
     CHAT_HISTORY_TTL: int = 60 * 60 * 24 * 7  # 7일
 
+    # [답변 캐시 설정]
+    ANSWER_CACHE_TTL: int = int(os.getenv("ANSWER_CACHE_TTL", "3600"))  # 1시간
+    ANSWER_CACHE_ENABLED: bool = os.getenv("ANSWER_CACHE_ENABLED", "true").lower() == "true"
+
     # [검색 설정]
     SEARCH_TOP_K: int = 4
 
     # [청크 설정 - RAG 문서 분할 (문자 기준)]
-    CHUNK_SIZE: int = 1000
-    CHUNK_OVERLAP: int = 200
+    CHUNK_SIZE: int = 700
+    CHUNK_OVERLAP: int = 150
     CONTEXT_EXPAND_SIZE: int = 800
 
     # [통화 요약 청크 설정 - tiktoken 토큰 기준]

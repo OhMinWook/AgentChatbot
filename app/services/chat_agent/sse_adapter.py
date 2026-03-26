@@ -2,6 +2,7 @@
 SSE 기반 Human-in-the-loop 어댑터 (토큰 스트리밍 지원)
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -13,11 +14,13 @@ from typing import AsyncGenerator, Dict, Any, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.checkpoint.memory import MemorySaver
-
+from langfuse.decorators import observe, langfuse_context
 from app.core.config import settings
+from app.core.langfuse_client import langfuse
 from app.services.chat_agent.graph import create_rag_graph
-from app.services.chat_agent.node_utils import stream_llm_tokens
+from app.services.chat_agent.node_utils import stream_llm_tokens, call_llm
 from app.services.rag.qdrant_service import qdrant_service
+from app.services.utils.answer_cache_service import answer_cache_service
 from app.services.utils.download_service import download_service
 from app.services.utils.sse_utils import SSEType
 
@@ -25,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 # precomputed 답변을 작은 청크로 나눌 때 사용할 크기
 _CHUNK_SIZE = 6
+
+_TRANSLATE_LANG_MAP = {
+    "en": "English",
+    "zh": "Chinese (Simplified)",
+    "ja": "Japanese",
+}
 
 # pending_threads TTL (초)
 class SSEGraphAdapter:
@@ -180,14 +189,73 @@ class SSEGraphAdapter:
                     yield self._format_sse({"type": SSEType.ANSWER, "content": final_answer[i:i + _CHUNK_SIZE]})
 
     # ------------------------------------------------------------------
+    # references만 SSE로 emit (번역 모드용)
+    # ------------------------------------------------------------------
+    async def _emit_references(self, final_state: dict) -> AsyncGenerator[bytes, None]:
+        """references + rag_documents SSE emit (한국어 스트리밍 없이)"""
+        agent_answers = final_state.get("agent_answers", [])
+        all_refs = []
+        all_rag_docs = []
+        for ans in agent_answers:
+            for ref in ans.get("sources", []):
+                if ref not in all_refs:
+                    all_refs.append(ref)
+            for doc in ans.get("rag_docs", []):
+                all_rag_docs.append(doc)
+
+        is_open_mode = final_state.get("filter_filename") is None
+        invoke_id = final_state.get("invoke_id", "")
+
+        if all_refs and is_open_mode:
+            sources = [ref.get("source") for ref in all_refs if ref.get("source")]
+            if sources:
+                metadata_map = await qdrant_service.get_document_metadata_by_source(invoke_id, sources)
+                for ref in all_refs:
+                    source = ref.get("source")
+                    if source and source in metadata_map:
+                        metadata = metadata_map[source]
+                        file_path = self._resolve_file_path(invoke_id, source, metadata)
+                        if file_path:
+                            link_info = download_service.create_download_link_from_path(
+                                file_path=file_path, filename=source,
+                                expires_in_seconds=3600, one_time=False
+                            )
+                            if link_info:
+                                ref["download_url"] = link_info["download_url"]
+
+        if all_refs:
+            yield self._format_sse({"type": SSEType.REFERENCES, "docs": all_refs})
+        if all_rag_docs:
+            yield self._format_sse({"type": SSEType.RAG_DOCUMENTS, "documents": all_rag_docs})
+
+    # ------------------------------------------------------------------
+    # 번역 스트리밍 헬퍼
+    # ------------------------------------------------------------------
+    async def _stream_translation(self, text: str, translate_to: str) -> AsyncGenerator[bytes, None]:
+        """한국어 답변을 지정 언어로 번역 후 SSE 스트리밍"""
+        lang_name = _TRANSLATE_LANG_MAP.get(translate_to, translate_to)
+        messages = [
+            {
+                "role": "system",
+                "content": f"Translate the following Korean text to {lang_name}. Output only the translation without any explanations or additional text."
+            },
+            {"role": "user", "content": text}
+        ]
+        async for token in stream_llm_tokens(messages, max_tokens=settings.DEFAULT_MAX_TOKENS):
+            if token:
+                yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": token})
+
+    # ------------------------------------------------------------------
     # invoke_with_sse
     # ------------------------------------------------------------------
+    @observe(capture_input=False, capture_output=False)
     async def invoke_with_sse(
         self,
         invoke_id: str,
         user_query: str,
         thread_id: Optional[str] = None,
-        filter_filename: Optional[str] = None
+        filter_filename: Optional[str] = None,
+        translate_to: Optional[str] = None
     ) -> AsyncGenerator[bytes, None]:
         """그래프 실행 및 SSE 스트리밍"""
         t_start = time.perf_counter()
@@ -204,10 +272,23 @@ class SSEGraphAdapter:
             "rewritten_questions": [],
             "agent_answers": [],
             "filter_filename": filter_filename,
+            "translate_to": translate_to,
             "streaming_payload": None
         }
 
         try:
+            # 캐시 확인 (오픈 챗에서만)
+            is_open = filter_filename is None
+            cached = await answer_cache_service.get(invoke_id, user_query) if is_open else None
+            if cached:
+                if cached.get("references"):
+                    yield self._format_sse({"type": SSEType.REFERENCES, "docs": cached["references"]})
+                content = cached.get("answer", "")
+                for i in range(0, len(content), _CHUNK_SIZE):
+                    yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
+                yield self._format_sse({"type": SSEType.DONE})
+                return
+
             yield self._format_sse({"type": SSEType.PROGRESS, "step": "답변을 준비하고 있습니다"})
 
             final_state = None
@@ -215,8 +296,28 @@ class SSEGraphAdapter:
                 final_state = event
 
             if final_state:
-                async for chunk in self._emit_final_answer(final_state, t_start=t_start):
+                answer_buffer = []
+
+                async def _collecting_emit():
+                    async for chunk in self._emit_final_answer(final_state, t_start=t_start):
+                        data = json.loads(chunk.decode("utf-8").removeprefix("data: ").strip())
+                        if data.get("type") == SSEType.ANSWER:
+                            answer_buffer.append(data.get("content", ""))
+                        yield chunk
+
+                async for chunk in _collecting_emit():
                     yield chunk
+
+                # 캐시 저장
+                full_answer = "".join(answer_buffer)
+                if full_answer:
+                    refs = []
+                    for ans in final_state.get("agent_answers", []):
+                        for ref in ans.get("sources", []):
+                            if ref not in refs:
+                                refs.append(ref)
+                    if is_open:
+                        await answer_cache_service.set(invoke_id, user_query, full_answer, refs)
 
             yield self._format_sse({"type": SSEType.DONE})
 

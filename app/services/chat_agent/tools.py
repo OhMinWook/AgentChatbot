@@ -8,6 +8,7 @@ import asyncio
 import logging
 from html import escape as html_escape
 from typing import List, Dict, Any
+from langfuse.decorators import observe
 from app.services.api_clients.model_server_client import model_server_client
 from app.services.rag.qdrant_service import qdrant_service
 from app.services.rag.sparse_encoder import sparse_encoder
@@ -27,6 +28,7 @@ class SearchTool:
     def __init__(self, invoke_id: str):
         self.invoke_id = invoke_id
 
+    @observe()
     async def search(self, query: str, top_k: int = None, filter_filename: str = None) -> Dict[str, Any]:
         """
         문서 검색 수행 (Hybrid: Dense + Sparse → RRF → Reranker)
@@ -117,9 +119,9 @@ class SearchTool:
             if len(results) >= k:
                 break
 
-            # 점수 필터링 (최소 2개 보장, 이후 임계값 미만 제외)
+            # 점수 필터링 (최소 1개 보장, 이후 임계값 미만 제외)
             score = r.get("score", 0.0)
-            if len(results) >= 2 and score < settings.RERANK_SCORE_THRESHOLD:
+            if len(results) >= 1 and score < settings.RERANK_SCORE_THRESHOLD:
                 logger.debug(f"[Search] 낮은 점수 스킵: {score:.3f}")
                 continue
 

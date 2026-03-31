@@ -286,6 +286,9 @@ class SSEGraphAdapter:
                 content = cached.get("answer", "")
                 for i in range(0, len(content), _CHUNK_SIZE):
                     yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
+                if translate_to:
+                    async for chunk in self._stream_translation(content, translate_to):
+                        yield chunk
                 yield self._format_sse({"type": SSEType.DONE})
                 return
 

@@ -186,7 +186,7 @@ async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 20
                                 end_idx = think_buffer.find("</think>")
                                 if end_idx != -1:
                                     in_think = False
-                                    think_buffer = think_buffer[end_idx + len("</think>"):]
+                                    think_buffer = think_buffer[end_idx + len("</think>"):].lstrip("\n")
                                 else:
                                     think_buffer = ""
                                     break

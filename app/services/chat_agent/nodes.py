@@ -9,7 +9,7 @@ import json
 from typing import Dict, Any
 
 from langchain_core.messages import HumanMessage, AIMessage
-from langfuse.decorators import observe, langfuse_context
+from langfuse import observe
 from app.core.langfuse_client import langfuse
 
 from app.services.chat_agent.graph_state import MainState
@@ -82,7 +82,7 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
 
     # Langfuse reranker_score 기록
     try:
-        trace_id = langfuse_context.get_current_trace_id()
+        trace_id = langfuse.get_current_trace_id()
         if trace_id:
             scores = [
                 doc["score"]
@@ -92,18 +92,18 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
             ]
             if scores:
                 avg_score = sum(scores) / len(scores)
-                langfuse.score(
+                langfuse.create_score(
                     trace_id=trace_id,
                     name="reranker_score",
                     value=round(avg_score, 4),
                     comment=f"청크 {len(scores)}개 평균"
                 )
-            langfuse.score(
+            langfuse.create_score(
                 trace_id=trace_id,
                 name="rag_doc_count",
                 value=len(scores),
             )
-            langfuse.score(
+            langfuse.create_score(
                 trace_id=trace_id,
                 name="cache_hit",
                 value=0,
@@ -166,11 +166,11 @@ async def verify_answer_node(state: MainState) -> Dict[str, Any]:
 
     # Langfuse 스코어 기록
     try:
-        trace_id = langfuse_context.get_current_trace_id()
+        trace_id = langfuse.get_current_trace_id()
         if trace_id:
             score_value = 0.0 if failed else 1.0
             comment = "; ".join(i for r in failed for i in r.get("issues", [])) if failed else "검증 통과"
-            langfuse.score(
+            langfuse.create_score(
                 trace_id=trace_id,
                 name="hallucination_check",
                 value=score_value,

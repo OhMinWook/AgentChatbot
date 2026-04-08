@@ -363,45 +363,60 @@ class AdminDocumentService:
     async def _get_all_documents(self) -> List[Dict]:
         """모든 관리자 문서 조회 (key별 그룹화)"""
         try:
-            results, _ = await self.client.scroll(
-                collection_name=settings.QDRANT_COLLECTION,
-                scroll_filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="invoke_id",
-                            match=models.MatchValue(value=settings.GLOBAL_INVOKE_ID),
-                        ),
-                        models.FieldCondition(
-                            key="key",
-                            match=models.MatchExcept(**{"except": [""]}),  # key가 비어있지 않은 것만
-                        ),
-                    ]
-                ),
-                limit=100000,
-                with_payload=["key", "admin_id", "admin_name", "source", "file_size", "regist_date", "is_use"],
-                with_vectors=False,
-            )
-
-            # key별 그룹화
             doc_map: Dict[str, Dict] = {}
-            for point in results:
-                payload = point.payload
-                key = payload.get("key", "")
-                if not key:
-                    continue
+            offset = None
+            
+            while True:
+                results, next_offset = await self.client.scroll(
+                    collection_name=settings.QDRANT_COLLECTION,
+                    scroll_filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="invoke_id",
+                                match=models.MatchValue(value=settings.GLOBAL_INVOKE_ID),
+                            ),
+                            models.FieldCondition(
+                                key="key",
+                                match=models.MatchExcept(**{"except": [""]}),  # key가 비어있지 않은 것만
+                            ),
+                            models.IsNullCondition(
+                                is_null=models.PayloadField(key="prev_chunk_id")
+                            ),
+                        ],
+                        must_not=[
+                            models.FieldCondition(
+                                key="admin_id",
+                                match=models.MatchValue(value="wikipedia"),
+                            )
+                        ]
+                    ),
+                    limit=10000,
+                    offset=offset,
+                    with_payload=["key", "admin_id", "admin_name", "source", "file_size", "regist_date", "is_use"],
+                    with_vectors=False,
+                )
 
-                if key not in doc_map:
-                    doc_map[key] = {
-                        "key": key,
-                        "admin_id": payload.get("admin_id", ""),
-                        "admin_name": payload.get("admin_name", ""),
-                        "file_name": payload.get("source", ""),
-                        "file_size": payload.get("file_size", 0),
-                        "regist_date": payload.get("regist_date", ""),
-                        "is_use": payload.get("is_use", True),
-                        "chunk_count": 0,
-                    }
-                doc_map[key]["chunk_count"] += 1
+                for point in results:
+                    payload = point.payload
+                    key = payload.get("key", "")
+                    if not key:
+                        continue
+
+                    if key not in doc_map:
+                        doc_map[key] = {
+                            "key": key,
+                            "admin_id": payload.get("admin_id", ""),
+                            "admin_name": payload.get("admin_name", ""),
+                            "file_name": payload.get("source", ""),
+                            "file_size": payload.get("file_size", 0),
+                            "regist_date": payload.get("regist_date", ""),
+                            "is_use": payload.get("is_use", True),
+                            "chunk_count": 1,
+                        }
+                
+                if next_offset is None:
+                    break
+                offset = next_offset
 
             return list(doc_map.values())
         except UnexpectedResponse as e:

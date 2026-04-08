@@ -10,7 +10,8 @@ import logging
 import re
 from typing import Dict, List, AsyncGenerator
 
-from langfuse.decorators import observe, langfuse_context
+from langfuse import observe
+from app.core.langfuse_client import langfuse
 from app.services.api_clients.llm_client import llm_client
 from app.core.config import settings
 from app.services.utils.llm_payload import build_chat_payload
@@ -129,7 +130,7 @@ async def generate_single_answer(agent_prompt, idx: int, question: str, doc_res:
         messages[-1]["content"] += f"\n\n[추가 지시] 위 답변을 반드시 한국어로 먼저 작성하고, 빈 줄 하나를 추가한 뒤 {lang_name}로 번역하여 출력하세요."
 
     high_risk = is_high_risk_question(question)
-    langfuse_context.update_current_observation(metadata={"high_risk": high_risk})
+    langfuse.update_current_span(metadata={"high_risk": high_risk})
     if high_risk:
         logger.info(f"[Process] 고위험 질문 - pre-generate: {question[:50]}")
         answer = await call_llm(messages, max_tokens=max_tokens)
@@ -188,7 +189,6 @@ async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 20
                                     in_think = False
                                     think_buffer = think_buffer[end_idx + len("</think>"):].lstrip("\n")
                                 else:
-                                    think_buffer = ""
                                     break
                             else:
                                 start_idx = think_buffer.find("<think>")

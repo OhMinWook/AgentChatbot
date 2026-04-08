@@ -14,6 +14,7 @@ from app.services.rag.qdrant_service import qdrant_service
 from app.services.rag.sparse_encoder import sparse_encoder
 from app.services.rag.text_utils import add_source_prefix
 from app.core.config import settings
+from app.services.agent_base.tool import BaseTool
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +22,31 @@ logger = logging.getLogger(__name__)
 RERANK_CANDIDATES = 64
 
 
-
-class SearchTool:
-    """문서 검색 도구"""
+class SearchTool(BaseTool):
+    """문서 검색 도구 — Hybrid 검색 파이프라인 (Dense + Sparse → RRF → Reranker)"""
 
     def __init__(self, invoke_id: str):
         self.invoke_id = invoke_id
+
+    @property
+    def name(self) -> str:
+        return "search_tool"
+
+    async def execute(self, input_text: str, **kwargs) -> Dict[str, Any]:
+        """BaseTool 인터페이스 구현 — search()로 위임"""
+        return await self.search(
+            query=input_text,
+            top_k=kwargs.get("top_k"),
+            filter_filename=kwargs.get("filter_filename"),
+        )
+
+    async def execute_batch(self, inputs: List[str], **kwargs) -> List[Dict[str, Any]]:
+        """BaseTool 인터페이스 구현 — search_batch()로 위임"""
+        return await self.search_batch(
+            queries=inputs,
+            top_k=kwargs.get("top_k"),
+            filter_filename=kwargs.get("filter_filename"),
+        )
 
     @observe()
     async def search(self, query: str, top_k: int = None, filter_filename: str = None) -> Dict[str, Any]:
@@ -119,9 +139,9 @@ class SearchTool:
             if len(results) >= k:
                 break
 
-            # 점수 필터링 (최소 1개 보장, 이후 임계값 미만 제외)
+            # 점수 필터링 (최소 N개 보장, 이후 임계값 미만 제외)
             score = r.get("score", 0.0)
-            if len(results) >= 1 and score < settings.RERANK_SCORE_THRESHOLD:
+            if len(results) >= settings.RERANK_MIN_RESULTS and score < settings.RERANK_SCORE_THRESHOLD:
                 logger.debug(f"[Search] 낮은 점수 스킵: {score:.3f}")
                 continue
 
@@ -132,8 +152,8 @@ class SearchTool:
             candidate = candidates[orig_idx]
             doc_id = candidate.doc_id
 
-            # 이미 선택된 청크의 인접 청크면 스킵
-            if doc_id in adjacent_ids:
+            # 이미 선택된 청크의 인접 청크면 스킵 (최소 결과 수 보장 후에만 적용)
+            if doc_id in adjacent_ids and len(results) >= settings.RERANK_MIN_RESULTS:
                 logger.debug(f"[Search] 인접 청크 스킵: {doc_id}")
                 continue
 

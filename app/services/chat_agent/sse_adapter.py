@@ -311,7 +311,7 @@ class SSEGraphAdapter:
                 async for chunk in _collecting_emit():
                     yield chunk
 
-                # 캐시 저장
+                # 캐시 저장 (관련 문서가 실제로 사용된 경우에만)
                 full_answer = "".join(answer_buffer)
                 if full_answer:
                     refs = []
@@ -319,7 +319,7 @@ class SSEGraphAdapter:
                         for ref in ans.get("sources", []):
                             if ref not in refs:
                                 refs.append(ref)
-                    if is_open:
+                    if is_open and refs:
                         await answer_cache_service.set(invoke_id, user_query, full_answer, refs)
 
             yield self._format_sse({"type": SSEType.DONE})

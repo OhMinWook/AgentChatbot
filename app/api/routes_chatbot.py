@@ -12,6 +12,7 @@ from app.services.utils.file_utils import save_upload_file
 from app.services.utils.sse_utils import create_sse_data, create_sse_response, SSEType
 from app.services.rag.rag_ingestion_service import rag_ingestion_service
 from app.services.chat_agent.sse_adapter import sse_graph_adapter
+from app.services.chat_agent.guardrails_impl import chat_guardrails
 from app.services.chat_agent.node_utils import stream_llm_tokens
 from app.services.chat_agent.tools import create_search_tool
 from app.services.chat_agent.document_summary_service import document_summary_service
@@ -154,12 +155,15 @@ async def send_private_message(
     - **translate_to**: 번역 언어 코드 (en=영어, zh=중국어, ja=일본어). 생략 시 번역 안 함.
     """
     try:
-        # SSE 생성기 생성
-        generator = sse_graph_adapter.invoke_with_sse(invokeId, message, filter_filename=target_filename, translate_to=translate_to)
+        guard = await chat_guardrails.check_input(message)
+        if not guard.allowed:
+            raise HTTPException(status_code=400, detail=guard.reason)
 
-        # 공통 헬퍼로 스트리밍 반환
-        return create_sse_response(_stream_chat_response(generator, invokeId, message, "Private"))
+        generator = sse_graph_adapter.invoke_with_sse(invokeId, guard.text, filter_filename=target_filename, translate_to=translate_to)
+        return create_sse_response(_stream_chat_response(generator, invokeId, guard.text, "Private"))
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[Private Message Error] {e}")
         raise HTTPException(status_code=500, detail="요청 처리 중 오류가 발생했습니다.")
@@ -177,12 +181,15 @@ async def send_open_message(
     - **translate_to**: 번역 언어 코드 (en=영어, zh=중국어, ja=일본어). 생략 시 번역 안 함.
     """
     try:
-        # SSE 생성기 생성
-        generator = sse_graph_adapter.invoke_with_sse(invokeId, message, filter_filename=None, translate_to=translate_to)
+        guard = await chat_guardrails.check_input(message)
+        if not guard.allowed:
+            raise HTTPException(status_code=400, detail=guard.reason)
 
-        # 공통 헬퍼로 스트리밍 반환
-        return create_sse_response(_stream_chat_response(generator, invokeId, message, "Open"))
+        generator = sse_graph_adapter.invoke_with_sse(invokeId, guard.text, filter_filename=None, translate_to=translate_to)
+        return create_sse_response(_stream_chat_response(generator, invokeId, guard.text, "Open"))
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[Open Message Error] {e}")
         raise HTTPException(status_code=500, detail="요청 처리 중 오류가 발생했습니다.")

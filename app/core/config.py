@@ -16,6 +16,7 @@ class Settings(BaseModel):
     QDRANT_COLLECTION: str = os.getenv("QDRANT_COLLECTION", "documents")
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploaded_files")
     RERANK_SCORE_THRESHOLD: float = float(os.getenv("RERANK_SCORE_THRESHOLD", "0.55"))
+    RERANK_MIN_RESULTS: int = int(os.getenv("RERANK_MIN_RESULTS", "2"))
 
     # [LLM 기본 설정]
     DEFAULT_MAX_TOKENS: int = int(os.getenv("DEFAULT_MAX_TOKENS", "2048"))

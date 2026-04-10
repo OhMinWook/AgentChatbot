@@ -1,8 +1,10 @@
 """
-LangGraph 노드 공용 유틸리티
-- LLM 호출 헬퍼
-- 스트리밍 토큰 생성기
-- 할루시네이션 위험도 판단
+LLM 호출 공통 헬퍼
+
+- call_llm: Non-streaming LLM 호출
+- stream_llm_tokens: 토큰 단위 스트리밍
+- strip_think_blocks: <think> 블록 제거
+- strip_markdown_codeblock: 마크다운 코드블록 제거
 """
 
 import json
@@ -10,50 +12,12 @@ import logging
 import re
 from typing import Dict, List, AsyncGenerator
 
-from langfuse.decorators import observe, langfuse_context
-from app.core.langfuse_client import langfuse
+from langfuse.decorators import observe
 from app.services.api_clients.llm_client import llm_client
-from app.core.config import settings
 from app.services.utils.llm_payload import build_chat_payload
 
 logger = logging.getLogger(__name__)
 
-# ── JSON 스키마 ──────────────────────────────────────────────────────────────
-
-VERIFY_ANSWER_JSON_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "passed": {"type": "boolean"},
-        "issues": {
-            "type": "array",
-            "items": {"type": "string"}
-        }
-    },
-    "required": ["passed", "issues"]
-}
-
-# ── 할루시네이션 위험도 ────────────────────────────────────────────────────────
-
-MAX_VERIFY_RETRIES = 1
-
-_HIGH_RISK_QUESTION_PATTERN = re.compile(
-    r"""
-    몇|얼마|언제|기한|날짜|기간|기준|조건|요건|자격|대상  # 구체적 정보 요구
-    | 비율|퍼센트|요율|[%％]                              # 수치 요구
-    | 금액|수당|급여|임금|보수|한도|상한|하한              # 금액 요구
-    | \d+                                               # 질문 자체에 숫자 포함
-    | 이상|이하|초과|미만|이내                            # 범위 조건 질문
-    """,
-    re.VERBOSE
-)
-
-
-def is_high_risk_question(question: str) -> bool:
-    """질문이 수치·날짜·조건 등 고위험 답변을 유도하는지 판단"""
-    return bool(_HIGH_RISK_QUESTION_PATTERN.search(question))
-
-
-# ── LLM 호출 헬퍼 ─────────────────────────────────────────────────────────────
 
 def strip_think_blocks(text: str) -> str:
     """<think>...</think> 블록 제거 (닫힌 태그 없는 경우도 처리)"""
@@ -86,69 +50,6 @@ async def call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json_
         logger.error(f"LLM call failed: {e}")
         return ""
 
-
-# ── process_question 헬퍼 ────────────────────────────────────────────────────
-
-def build_agent_messages(agent_prompt, question: str, doc_res: Dict) -> List[Dict[str, str]] | None:
-    """검색 결과로부터 LLM 메시지를 구성한다. context가 없으면 None."""
-    doc_context = doc_res.get("context", "")
-    if not doc_context:
-        return None
-    return [
-        {"role": "system", "content": agent_prompt.system},
-        {"role": "user", "content": agent_prompt.user.format(context=doc_context, question=question)}
-    ]
-
-
-_TRANSLATE_LANG_NAMES = {
-    "en": "English",
-    "zh": "Chinese (Simplified)",
-    "ja": "Japanese",
-}
-
-
-@observe()
-async def generate_single_answer(agent_prompt, idx: int, question: str, doc_res: Dict, max_tokens: int, translate_to: str = None) -> Dict:
-    """단일 질문에 대해 검색 결과 기반 답변을 생성한다.
-    - 고위험 질문: LLM pre-generate (검증용)
-    - 저위험 질문: 스트리밍 준비만 (answer="")
-    """
-    references = doc_res.get("references", [])
-    rag_docs = doc_res.get("results", [])
-    context = doc_res.get("context", "")
-    messages = build_agent_messages(agent_prompt, question, doc_res)
-
-    if messages is None:
-        return {
-            "idx": idx, "question": question,
-            "answer": f"'{question}'에 대한 관련 문서를 찾지 못했습니다.",
-            "context": "", "messages": None, "sources": [], "rag_docs": []
-        }
-
-    if translate_to and messages:
-        lang_name = _TRANSLATE_LANG_NAMES.get(translate_to, translate_to)
-        messages[-1]["content"] += f"\n\n[추가 지시] 위 답변을 반드시 한국어로 먼저 작성하고, 빈 줄 하나를 추가한 뒤 {lang_name}로 번역하여 출력하세요."
-
-    high_risk = is_high_risk_question(question)
-    langfuse_context.update_current_observation(metadata={"high_risk": high_risk})
-    if high_risk:
-        logger.info(f"[Process] 고위험 질문 - pre-generate: {question[:50]}")
-        answer = await call_llm(messages, max_tokens=max_tokens)
-    else:
-        logger.info(f"[Process] 저위험 질문 - 스트리밍 준비: {question[:50]}")
-        answer = ""
-
-    return {
-        "idx": idx, "question": question,
-        "answer": answer,
-        "context": context if high_risk else "",
-        "messages": messages,
-        "sources": references,
-        "rag_docs": rag_docs
-    }
-
-
-# ── vLLM 스트리밍 ─────────────────────────────────────────────────────────────
 
 async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 2048) -> AsyncGenerator[str, None]:
     """vLLM SSE 스트리밍 응답을 토큰 단위로 yield하는 async generator"""

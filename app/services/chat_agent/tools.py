@@ -8,7 +8,7 @@ import asyncio
 import logging
 from html import escape as html_escape
 from typing import List, Dict, Any
-from langfuse import observe
+from langfuse.decorators import observe
 from app.services.api_clients.model_server_client import model_server_client
 from app.services.rag.qdrant_service import qdrant_service
 from app.services.rag.sparse_encoder import sparse_encoder

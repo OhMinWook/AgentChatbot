@@ -9,7 +9,7 @@ import json
 from typing import Dict, Any
 
 from langchain_core.messages import HumanMessage, AIMessage
-from langfuse import observe
+from langfuse.decorators import observe
 from app.core.langfuse_client import langfuse
 
 from app.services.chat_agent.graph_state import MainState

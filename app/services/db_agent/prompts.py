@@ -55,7 +55,8 @@ SQL_GENERATOR = PromptPair(
 - 텍스트 검색은 LIKE '%키워드%' 를 활용하세요.
 - 검색 키워드는 반드시 한국어로 변환하여 사용하세요. (예: network → 네트워크, server → 서버)
 - 결과는 최대 10건으로 제한하세요 (LIMIT 10).
-- failure_cause, resolution, prevention_measure 컬럼을 우선 검색하세요.
+- WHERE 조건에 반드시 title, issue_content, failure_cause, resolution, prevention_measure 5개 컬럼을 모두 OR로 검색하세요.
+  예: WHERE title LIKE '%키워드%' OR issue_content LIKE '%키워드%' OR failure_cause LIKE '%키워드%' OR resolution LIKE '%키워드%' OR prevention_measure LIKE '%키워드%'
 - SQL 생성 조건에 해당하지 않으면 반드시 빈 문자열만 반환하세요.
 """,
     user="질문: {question}"

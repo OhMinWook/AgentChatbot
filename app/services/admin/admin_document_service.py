@@ -383,12 +383,6 @@ class AdminDocumentService:
                                 is_null=models.PayloadField(key="prev_chunk_id")
                             ),
                         ],
-                        must_not=[
-                            models.FieldCondition(
-                                key="admin_id",
-                                match=models.MatchValue(value="wikipedia"),
-                            )
-                        ]
                     ),
                     limit=10000,
                     offset=offset,

@@ -8,7 +8,7 @@ DB Agent 메인 오케스트레이터
 import logging
 from typing import Any, Dict, List
 
-from langfuse.decorators import observe
+from app.core.langfuse_client import observe  # langfuse 비활성화 스텁
 
 from app.services.agent_base.base_agent import BaseAgent
 from app.services.db_agent.prompts import AGENT

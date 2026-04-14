@@ -14,9 +14,8 @@ from typing import AsyncGenerator, Dict, Any, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.checkpoint.memory import MemorySaver
-from langfuse.decorators import observe
+from app.core.langfuse_client import observe, langfuse  # langfuse 비활성화 스텁
 from app.core.config import settings
-from app.core.langfuse_client import langfuse
 from app.services.chat_agent.graph import create_rag_graph
 from app.services.chat_agent.node_utils import stream_llm_tokens, call_llm
 from app.services.rag.qdrant_service import qdrant_service

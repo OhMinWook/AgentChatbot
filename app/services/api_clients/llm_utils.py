@@ -12,7 +12,7 @@ import logging
 import re
 from typing import Dict, List, AsyncGenerator
 
-from langfuse.decorators import observe
+from app.core.langfuse_client import observe  # langfuse 비활성화 스텁
 from app.services.api_clients.llm_client import llm_client
 from app.services.utils.llm_payload import build_chat_payload
 

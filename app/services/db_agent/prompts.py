@@ -42,6 +42,7 @@ SQL_GENERATOR = PromptPair(
 - 장애 해결 방법 조회 (예: "~장애 어떻게 해결했어", "~복구 방법")
 - 장애 이력/현황 조회 (예: "최근 장애 목록", "~관련 이슈 내역")
 - 예방 조치 조회 (예: "~재발 방지 방법")
+- 특정 기능/서비스의 오작동·이상 현상을 묘사하는 경우 (문장이 의문문이 아니더라도, 사용자가 문제 상황을 설명하고 있다면 SQL을 생성하세요)
 
 다음 유형의 질문은 SQL을 생성하지 말고 빈 문자열을 반환하세요:
 - 사용 방법, 등록 방법, 설정 방법 등 절차/가이드 질문 (예: "내선 번호 등록하는 방법", "어떻게 사용해")
@@ -52,12 +53,49 @@ SQL_GENERATOR = PromptPair(
 ## 지시사항
 - SELECT 쿼리만 생성하세요. (INSERT, UPDATE, DELETE 금지)
 - 마크다운 코드블록이나 설명 없이 순수 SQL만 반환하세요.
-- 텍스트 검색은 LIKE '%키워드%' 를 활용하세요.
-- 검색 키워드는 반드시 한국어로 변환하여 사용하세요. (예: network → 네트워크, server → 서버)
 - 결과는 최대 10건으로 제한하세요 (LIMIT 10).
-- WHERE 조건에 반드시 title, issue_content, failure_cause, resolution, prevention_measure 5개 컬럼을 모두 OR로 검색하세요.
-  예: WHERE title LIKE '%키워드%' OR issue_content LIKE '%키워드%' OR failure_cause LIKE '%키워드%' OR resolution LIKE '%키워드%' OR prevention_measure LIKE '%키워드%'
 - SQL 생성 조건에 해당하지 않으면 반드시 빈 문자열만 반환하세요.
+
+## 키워드 추출 및 검색 규칙 (중요)
+1. **키워드 분해**: 질문을 핵심 키워드 2~4개로 분해하세요.
+   - 조사/어미/불용어("~의", "~는", "방법", "알려줘", "원인" 등)는 제거
+   - 영어는 한국어로 변환 (network → 네트워크, server → 서버)
+   - 예: "네트워크 장애 복구 방법" → ["네트워크", "장애", "복구"]
+   - 예: "삼성 전자 매출 문제" → ["삼성전자", "매출"]
+
+2. **공백 정규화**: 띄어쓰기로 답변이 달라지지 않도록 컬럼과 검색어 양쪽의 공백을 제거하여 비교하세요.
+   - 반드시 `REPLACE(컬럼, ' ', '') LIKE REPLACE('%키워드%', ' ', '')` 형식 사용
+
+3. **WHERE 조건 작성**: 추출한 각 키워드에 대해 title, issue_content, failure_cause, resolution, prevention_measure 5개 컬럼을 모두 OR로 검색하고, 키워드 간에도 OR로 연결하세요.
+
+## SQL 예시
+질문: "네트워크 장애 복구 방법"
+추출 키워드: ["네트워크", "장애", "복구"]
+
+```
+SELECT * FROM wb_v1_task
+WHERE (
+    REPLACE(title, ' ', '') LIKE REPLACE('%네트워크%', ' ', '')
+    OR REPLACE(issue_content, ' ', '') LIKE REPLACE('%네트워크%', ' ', '')
+    OR REPLACE(failure_cause, ' ', '') LIKE REPLACE('%네트워크%', ' ', '')
+    OR REPLACE(resolution, ' ', '') LIKE REPLACE('%네트워크%', ' ', '')
+    OR REPLACE(prevention_measure, ' ', '') LIKE REPLACE('%네트워크%', ' ', '')
+) OR (
+    REPLACE(title, ' ', '') LIKE REPLACE('%장애%', ' ', '')
+    OR REPLACE(issue_content, ' ', '') LIKE REPLACE('%장애%', ' ', '')
+    OR REPLACE(failure_cause, ' ', '') LIKE REPLACE('%장애%', ' ', '')
+    OR REPLACE(resolution, ' ', '') LIKE REPLACE('%장애%', ' ', '')
+    OR REPLACE(prevention_measure, ' ', '') LIKE REPLACE('%장애%', ' ', '')
+) OR (
+    REPLACE(title, ' ', '') LIKE REPLACE('%복구%', ' ', '')
+    OR REPLACE(issue_content, ' ', '') LIKE REPLACE('%복구%', ' ', '')
+    OR REPLACE(failure_cause, ' ', '') LIKE REPLACE('%복구%', ' ', '')
+    OR REPLACE(resolution, ' ', '') LIKE REPLACE('%복구%', ' ', '')
+    OR REPLACE(prevention_measure, ' ', '') LIKE REPLACE('%복구%', ' ', '')
+)
+LIMIT 10;
+```
+
 """,
     user="질문: {question}"
 )

@@ -8,7 +8,7 @@ import re
 import time
 from typing import AsyncGenerator, Dict, Any, Optional
 
-from langfuse.decorators import observe
+from app.core.langfuse_client import observe  # langfuse 비활성화 스텁
 
 from app.services.db_agent.agent import db_main_agent
 from app.services.api_clients.llm_utils import stream_llm_tokens

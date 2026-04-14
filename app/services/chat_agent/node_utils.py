@@ -10,8 +10,7 @@ import logging
 import re
 from typing import Dict, List, AsyncGenerator
 
-from langfuse.decorators import observe, langfuse_context
-from app.core.langfuse_client import langfuse
+from app.core.langfuse_client import observe, langfuse_context, langfuse  # langfuse 비활성화 스텁
 from app.services.api_clients.llm_client import llm_client
 from app.core.config import settings
 from app.services.utils.llm_payload import build_chat_payload

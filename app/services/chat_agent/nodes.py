@@ -9,8 +9,7 @@ import json
 from typing import Dict, Any
 
 from langchain_core.messages import HumanMessage, AIMessage
-from langfuse.decorators import observe
-from app.core.langfuse_client import langfuse
+from app.core.langfuse_client import observe, langfuse  # langfuse 비활성화 스텁
 
 from app.services.chat_agent.graph_state import MainState
 from app.services.chat_agent.prompts import (

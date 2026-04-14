@@ -90,7 +90,7 @@ class RouterAgent:
                 {"role": "system", "content": SQL_GENERATOR.system},
                 {"role": "user", "content": SQL_GENERATOR.user.format(question=question)},
             ],
-            max_tokens=512,
+            max_tokens=1024,
         )
         response = await llm_client.chat_completions(payload)
         raw = llm_client.extract_content(response)

@@ -1,15 +1,82 @@
 import json
 import logging
 import os
+import re
+import tempfile
+import zipfile
+from typing import Optional
 from urllib.parse import quote
+from xml.etree import ElementTree as ET
 
-from fastapi import APIRouter, HTTPException, Form
+from fastapi import APIRouter, HTTPException, Form, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse
 
 logger = logging.getLogger(__name__)
 
 from app.services.documents.document_automater_service import document_automater_service
+from app.services.documents.meeting_minutes_service import meeting_minutes_service
+from app.core.config import settings
+from app.services.rag.extractors import file_text_extractor
 from app.services.utils.download_service import download_service
+
+
+def _extract_hwpx_text(file_path: str) -> Optional[str]:
+    """HWPX(ZIP+XML) 파일에서 텍스트를 직접 추출 (한컴 오피스/win32com 불필요).
+
+    1순위: Preview/PrvText.txt (문서 전체 평문, 표/헤더 포함)
+    2순위: Contents/section*.xml의 <hp:t> 텍스트 노드
+    """
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            names = zf.namelist()
+
+            if "Preview/PrvText.txt" in names:
+                raw = zf.read("Preview/PrvText.txt")
+                for enc in ("utf-8", "utf-16", "utf-16-le", "cp949"):
+                    try:
+                        text = raw.decode(enc)
+                    except UnicodeDecodeError:
+                        continue
+                    text = text.strip()
+                    if text:
+                        return text
+
+            texts: list[str] = []
+            section_names = sorted(
+                n for n in names
+                if n.startswith("Contents/section") and n.endswith(".xml")
+            )
+            for name in section_names:
+                try:
+                    raw = zf.read(name)
+                    root = ET.fromstring(raw)
+                except (KeyError, ET.ParseError):
+                    continue
+                for elem in root.iter():
+                    tag = elem.tag.split("}", 1)[-1]
+                    if tag in ("t", "char") and elem.text:
+                        texts.append(elem.text)
+                texts.append("\n")
+
+        joined = "".join(texts)
+        joined = re.sub(r"[ \t]+", " ", joined)
+        joined = re.sub(r"\n{3,}", "\n\n", joined).strip()
+        return joined or None
+    except Exception as e:
+        logger.error(f"[MeetingMinutes] HWPX direct parse failed: {e}")
+        return None
+
+
+def _detect_file_type_for_meeting(file_name: str) -> str:
+    _, ext = os.path.splitext(file_name)
+    ext_lower = ext.lower().strip()
+    if settings.POLARIS_ENABLED:
+        return "polaris"
+    if ext_lower in ['.hwp', '.hwpx']:
+        return "hwp_win32"
+    if ext_lower == '.pdf':
+        return "pdf"
+    return "markitdown"
 
 router = APIRouter()
 
@@ -134,6 +201,173 @@ async def generate_hwpx_document_api(
     except Exception as e:
         logger.error(f"[HWPX Generation Error] {e}")
         raise HTTPException(status_code=500, detail=f"서버 내부 오류: {e}")
+
+
+@router.post("/documents/meeting-minutes/generate-from-text", summary="회의 원문 텍스트 -> AI 회의록 HWPX 생성 (SSE 진행률)")
+async def generate_meeting_minutes_from_text(
+        raw_text: Optional[str] = Form(None, description="회의 원문 텍스트 (붙여넣기) - 선택"),
+        file: Optional[UploadFile] = File(None, description="회의 원문 파일 (pdf/hwp/hwpx/docx/txt 등). raw_text와 함께 전송 가능"),
+        expires_in: int = Form(3600, description="다운로드 링크 만료 시간 (초)"),
+        one_time: bool = Form(True, description="1회용 링크 여부"),
+):
+    """
+    회의 원문 텍스트 또는 파일을 받아 LLM으로 구조화된 회의록 JSON을 추출한 뒤,
+    `template3.hwpx` 템플릿으로 HWPX 파일을 생성하여 다운로드 링크를 반환합니다.
+
+    응답은 **SSE(text/event-stream)** 형식이며, 각 이벤트는 다음 스키마의 JSON 한 줄입니다.
+
+    ```json
+    {"stage": "extract|llm|render|link|done|error", "percent": 0-100, "message": "...", "data": {...}}
+    ```
+
+    - 최종 성공 시 `stage="done"`, `percent=100`, `data`에 `download_url`, `expires_at`, `filename`, `extracted` 포함.
+    - 실패 시 `stage="error"`와 `message` 전송 후 스트림 종료.
+
+    참고: 파일 업로드 자체의 바이트 진행률은 서버가 핸들러 진입 시점에 이미 업로드 완료 상태이므로
+    내보낼 수 없습니다. 업로드 진행률은 클라이언트 측(XHR/axios `onUploadProgress`)에서 표시하세요.
+    """
+    # 파일은 핸들러 진입 시 이미 업로드 완료 상태 — 바이트를 먼저 읽어두고
+    # 이후 단계별 진행률을 SSE로 스트리밍한다.
+    uploaded_suffix = ""
+    uploaded_bytes: Optional[bytes] = None
+    uploaded_filename: Optional[str] = None
+    if file is not None and file.filename:
+        uploaded_filename = file.filename
+        uploaded_suffix = os.path.splitext(file.filename)[1] or ""
+        uploaded_bytes = await file.read()
+        if not uploaded_bytes:
+            raise HTTPException(status_code=400, detail="업로드된 파일이 비어 있습니다.")
+
+    if not (raw_text and raw_text.strip()) and not uploaded_bytes:
+        raise HTTPException(status_code=400, detail="raw_text 또는 file 중 하나는 반드시 제공되어야 합니다.")
+
+    async def event_stream():
+        def _event(stage: str, percent: int, message: str = "", data: Optional[dict] = None) -> str:
+            payload = {"stage": stage, "percent": percent, "message": message}
+            if data is not None:
+                payload["data"] = data
+            return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+        tmp_path = None
+        try:
+            yield _event("start", 0, "요청 수신")
+
+            # 1단계: 파일 텍스트 추출 (0 -> 30%)
+            file_text = ""
+            if uploaded_bytes:
+                yield _event("extract", 5, "파일 텍스트 추출 시작")
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded_suffix) as tmp:
+                        tmp.write(uploaded_bytes)
+                        tmp_path = tmp.name
+
+                    ext_lower = uploaded_suffix.lower()
+                    if ext_lower == ".hwpx":
+                        file_text = _extract_hwpx_text(tmp_path) or ""
+                    if not file_text:
+                        file_type = _detect_file_type_for_meeting(uploaded_filename or "")
+                        try:
+                            page_results, md_content = await file_text_extractor.extract_text(tmp_path, file_type)
+                        except Exception as ex_inner:
+                            logger.warning(f"[MeetingMinutes] extractor failed, fallback empty: {ex_inner}")
+                            page_results, md_content = None, None
+                        if md_content:
+                            file_text = md_content
+                        elif page_results:
+                            file_text = "\n".join(text for _, text in page_results)
+                except Exception as e:
+                    logger.exception(f"[MeetingMinutes] file extraction error: {e}")
+                    yield _event("error", 0, f"파일에서 텍스트를 추출하지 못했습니다: {e}")
+                    return
+                yield _event("extract", 30, "파일 텍스트 추출 완료")
+            else:
+                yield _event("extract", 30, "파일 없음 - raw_text 사용")
+
+            combined_parts = []
+            if raw_text and raw_text.strip():
+                combined_parts.append(raw_text.strip())
+            if file_text and file_text.strip():
+                combined_parts.append(file_text.strip())
+
+            if not combined_parts:
+                yield _event("error", 0, "추출된 텍스트가 없습니다.")
+                return
+
+            combined_text = "\n\n".join(combined_parts)
+
+            # 2단계: LLM 회의록 JSON 추출 (30 -> 70%)
+            yield _event("llm", 35, "LLM 회의록 구조화 시작")
+            try:
+                context_data = await meeting_minutes_service.extract_meeting_minutes_json(combined_text)
+            except ValueError as e:
+                yield _event("error", 35, f"회의록 추출 실패: {e}")
+                return
+            except Exception as e:
+                logger.exception(f"[MeetingMinutes] extraction error: {e}")
+                yield _event("error", 35, f"회의록 추출 중 서버 오류: {e}")
+                return
+            yield _event("llm", 70, "LLM 회의록 구조화 완료")
+
+            # 3단계: HWPX 렌더링 (70 -> 90%)
+            yield _event("render", 75, "HWPX 템플릿 렌더링 시작")
+            try:
+                generated_hwpx_bytes = document_automater_service.generate_hwpx_document(
+                    template_name="template3.hwpx",
+                    context_data=context_data,
+                )
+            except FileNotFoundError as e:
+                yield _event("error", 75, f"템플릿을 찾을 수 없습니다: {e}")
+                return
+            except ValueError as e:
+                yield _event("error", 75, f"렌더링 실패: {e}")
+                return
+            except Exception as e:
+                logger.exception(f"[MeetingMinutes] HWPX generation error: {e}")
+                yield _event("error", 75, f"서버 내부 오류: {e}")
+                return
+            yield _event("render", 90, "HWPX 렌더링 완료")
+
+            # 4단계: 다운로드 링크 생성 (90 -> 100%)
+            yield _event("link", 95, "다운로드 링크 생성")
+            media_type = "application/haansofthwpml"
+            filename = "generated_meeting_minutes.hwpx"
+            link_info = download_service.create_download_link(
+                file_bytes=generated_hwpx_bytes,
+                filename=filename,
+                expires_in_seconds=expires_in,
+                one_time=one_time,
+                media_type=media_type,
+            )
+
+            yield _event(
+                "done",
+                100,
+                "완료",
+                data={
+                    "success": True,
+                    "download_url": link_info["download_url"],
+                    "expires_at": link_info["expires_at"],
+                    "one_time": link_info["one_time"],
+                    "filename": filename,
+                    "extracted": context_data,
+                },
+            )
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.get("/documents/download/{token}", summary="토큰 기반 파일 다운로드")

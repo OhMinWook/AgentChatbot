@@ -21,7 +21,6 @@ async def preprocess_audio_ffmpeg(audio_bytes: bytes, ext: str) -> bytes:
     """ffmpeg로 오디오 전처리: 통화 대역 필터(300~3400Hz) + 16kHz 업샘플링 + 모노 변환"""
     cmd = [
         settings.FFMPEG_PATH, "-f", ext, "-i", "pipe:0",
-        "-af", "highpass=f=300,lowpass=f=3400",
         "-ar", "16000",
         "-ac", "1",
         "-f", "wav", "pipe:1",

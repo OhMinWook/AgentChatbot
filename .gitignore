@@ -1,5 +1,6 @@
 .venv/
 venv/
+dataset/voice/
 .idea/
 markitdown_packages/
 uploaded_files/
@@ -12,3 +13,4 @@ libs
 CLAUDE.md
 .env
 test_ui.html
+.claude/skills/

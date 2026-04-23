@@ -124,10 +124,6 @@ async def generate_single_answer(agent_prompt, idx: int, question: str, doc_res:
             "context": "", "messages": None, "sources": [], "rag_docs": []
         }
 
-    if translate_to and messages:
-        lang_name = _TRANSLATE_LANG_NAMES.get(translate_to, translate_to)
-        messages[-1]["content"] += f"\n\n[추가 지시] 위 답변을 반드시 한국어로 먼저 작성하고, 빈 줄 하나를 추가한 뒤 {lang_name}로 번역하여 출력하세요."
-
     high_risk = is_high_risk_question(question)
     langfuse_context.update_current_observation(metadata={"high_risk": high_risk})
     if high_risk:

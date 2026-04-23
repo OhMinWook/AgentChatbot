@@ -55,7 +55,7 @@ class STTClient(BaseAPIClient):
 
         url = f"{self.base_url}/v1/audio/transcriptions"
         files = {"file": (filename, audio_bytes, mime_type)}
-        data = {"model": "whisper-large-v3-turbo"}
+        data = {"model": "whisper-large-v3"}
 
         try:
             response = await self._request_with_retry("POST", url, files=files, data=data)

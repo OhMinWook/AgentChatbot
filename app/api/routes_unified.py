@@ -48,6 +48,7 @@ async def send_unified_message(
     invokeId: str,
     message: str = Form(..., description="사용자 질문"),
     target_filename: Optional[str] = Form(None, description="문서 파일명 (업로드된 경우)"),
+    translate_to: Optional[str] = Form(None, description="번역 언어 코드 (en/zh/ja)"),
 ):
     """
     통합 챗봇 엔드포인트
@@ -64,6 +65,7 @@ async def send_unified_message(
             invoke_id=invokeId,
             user_query=guard.text,
             target_filename=target_filename,
+            translate_to=translate_to,
         )
         return create_sse_response(_stream_response(generator, invokeId, guard.text))
 

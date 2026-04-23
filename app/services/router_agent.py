@@ -28,6 +28,7 @@ class RouterAgent:
         invoke_id: str,
         user_query: str,
         target_filename: Optional[str] = None,
+        translate_to: Optional[str] = None,
     ) -> AsyncGenerator[bytes, None]:
         """
         라우팅 메인 메서드
@@ -41,15 +42,16 @@ class RouterAgent:
                 invoke_id=invoke_id,
                 user_query=user_query,
                 filter_filename=target_filename,
+                translate_to=translate_to,
             ):
                 yield chunk
         else:
             logger.info(f"[Router] DB 조회 라우팅: {user_query[:50]}")
-            async for chunk in self._route_to_db(invoke_id, user_query):
+            async for chunk in self._route_to_db(invoke_id, user_query, translate_to):
                 yield chunk
 
     async def _route_to_db(
-        self, invoke_id: str, user_query: str
+        self, invoke_id: str, user_query: str, translate_to: Optional[str] = None
     ) -> AsyncGenerator[bytes, None]:
         """DB 조회 후 결과에 따라 db_agent 또는 chat_agent(벡터 DB)로 라우팅"""
 
@@ -80,6 +82,7 @@ class RouterAgent:
             invoke_id=invoke_id,
             user_query=user_query,
             filter_filename=None,
+            translate_to=translate_to,
         ):
             yield chunk
 

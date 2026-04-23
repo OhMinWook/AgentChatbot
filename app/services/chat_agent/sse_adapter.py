@@ -14,7 +14,7 @@ from typing import AsyncGenerator, Dict, Any, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.checkpoint.memory import MemorySaver
-from app.core.langfuse_client import observe, langfuse  # langfuse 비활성화 스텁
+from app.core.langfuse_client import observe, langfuse, langfuse_context  # langfuse 비활성화 스텁
 from app.core.config import settings
 from app.services.chat_agent.graph import create_rag_graph
 from app.services.chat_agent.node_utils import stream_llm_tokens, call_llm
@@ -283,6 +283,14 @@ class SSEGraphAdapter:
                 if cached.get("references"):
                     yield self._format_sse({"type": SSEType.REFERENCES, "docs": cached["references"]})
                 content = cached.get("answer", "")
+                try:
+                    langfuse_context.update_current_observation(
+                        input=user_query,
+                        output=content,
+                        metadata={"cache_hit": True},
+                    )
+                except Exception:
+                    pass
                 for i in range(0, len(content), _CHUNK_SIZE):
                     yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
                 if translate_to:
@@ -313,6 +321,15 @@ class SSEGraphAdapter:
                 # 캐시 저장 (관련 문서가 실제로 사용된 경우에만)
                 full_answer = "".join(answer_buffer)
                 if full_answer:
+                    # Langfuse: 스트리밍 답변 텍스트 기록 (저위험 질문은 call_llm을 거치지 않으므로 여기서 캡처)
+                    try:
+                        langfuse_context.update_current_observation(
+                            input=user_query,
+                            output=full_answer,
+                        )
+                    except Exception:
+                        pass
+
                     refs = []
                     for ans in final_state.get("agent_answers", []):
                         for ref in ans.get("sources", []):
@@ -320,6 +337,10 @@ class SSEGraphAdapter:
                                 refs.append(ref)
                     if is_open and refs:
                         await answer_cache_service.set(invoke_id, user_query, full_answer, refs)
+
+                if translate_to and full_answer:
+                    async for chunk in self._stream_translation(full_answer, translate_to):
+                        yield chunk
 
             yield self._format_sse({"type": SSEType.DONE})
 

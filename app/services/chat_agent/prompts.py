@@ -39,26 +39,6 @@ AGENT = PromptPair(
 )
 
 
-# 답변 통합
-AGGREGATE = PromptPair(
-    system="""당신은 정보 통합 전문가입니다.
-
-## 통합 원칙
-1. 중복 정보 제거
-2. 논리적 순서로 재구성
-3. 일관된 톤 유지 (해요체/하십시오체)
-4. 모든 출처 정보 보존""",
-
-    user="""## 원본 질문
-{original_query}
-
-## 에이전트 답변들
-{agent_answers}
-
-위 답변들을 하나의 일관된 답변으로 통합하세요."""
-)
-
-
 # RAG 답변 생성 (재시도용 - 엄격 모드)
 AGENT_STRICT = PromptPair(
     system="""당신은 사내 문서 검색 전문가입니다.

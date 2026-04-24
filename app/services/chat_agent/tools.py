@@ -18,8 +18,8 @@ from app.services.agent_base.tool import BaseTool
 
 logger = logging.getLogger(__name__)
 
-# Reranker 후보 수 (Qdrant에서 가져올 개수)
-RERANK_CANDIDATES = 64
+# Reranker 후보 수 (Qdrant에서 가져올 개수) — config.py RERANK_CANDIDATES로 관리
+RERANK_CANDIDATES = settings.RERANK_CANDIDATES
 
 
 class SearchTool(BaseTool):
@@ -68,6 +68,7 @@ class SearchTool(BaseTool):
         # 1. Dense 쿼리 임베딩 생성
         embeddings = await model_server_client.embed_texts([query], is_query=True)
         if not embeddings:
+            logger.error(f"[Search] 임베딩 생성 실패 — 모델 서버 응답 없음 (query: {query[:50]})")
             return {"context": None, "references": [], "results": []}
         query_embedding = embeddings[0]
 
@@ -152,8 +153,8 @@ class SearchTool(BaseTool):
             candidate = candidates[orig_idx]
             doc_id = candidate.doc_id
 
-            # 이미 선택된 청크의 인접 청크면 스킵 (최소 결과 수 보장 후에만 적용)
-            if doc_id in adjacent_ids and len(results) >= settings.RERANK_MIN_RESULTS:
+            # 이미 선택된 청크의 인접 청크면 항상 스킵
+            if doc_id in adjacent_ids:
                 logger.debug(f"[Search] 인접 청크 스킵: {doc_id}")
                 continue
 
@@ -238,6 +239,7 @@ class SearchTool(BaseTool):
 
             expanded_doc = doc.copy()
             expanded_doc["content"] = content + appended_content
+            expanded_doc["metadata"] = {**doc.get("metadata", {}), "next_chunk_id": next_id}
             expanded_results.append(expanded_doc)
 
         return expanded_results

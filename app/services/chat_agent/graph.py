@@ -10,7 +10,6 @@ from app.services.chat_agent.graph_state import MainState
 from app.services.chat_agent.nodes import (
     process_question_node,
     verify_answer_node,
-    aggregate_node
 )
 from app.services.chat_agent.edges import (
     route_after_verify,
@@ -27,22 +26,20 @@ def create_rag_graph(checkpointer=None):
     # 노드 추가
     builder.add_node("process_question", process_question_node)
     builder.add_node("verify_answer", verify_answer_node)
-    builder.add_node("aggregate", aggregate_node)
 
     # 엣지 연결
     builder.add_edge(START, "process_question")
 
-    # process_question → verify_answer → [retry: process_question | pass: aggregate] → END
+    # process_question → verify_answer → [retry: process_question | pass: END]
     builder.add_edge("process_question", "verify_answer")
     builder.add_conditional_edges(
         "verify_answer",
         route_after_verify,
         {
             "retry": "process_question",
-            "aggregate": "aggregate"
+            "end": END
         }
     )
-    builder.add_edge("aggregate", END)
 
     if checkpointer is None:
         checkpointer = MemorySaver()

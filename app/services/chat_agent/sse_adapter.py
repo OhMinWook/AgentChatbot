@@ -2,7 +2,6 @@
 SSE 기반 Human-in-the-loop 어댑터 (토큰 스트리밍 지원)
 """
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -12,7 +11,6 @@ import time
 import uuid
 from typing import AsyncGenerator, Dict, Any, Optional
 
-from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 from app.core.langfuse_client import observe, langfuse, langfuse_context  # langfuse 비활성화 스텁
 from app.core.config import settings
@@ -66,8 +64,12 @@ class SSEGraphAdapter:
     async def _stream_answer_tokens(
         self, streaming_payload: dict, t_start: float = None
     ) -> AsyncGenerator[bytes, None]:
-        """streaming_payload를 기반으로 answer 이벤트를 청크 단위로 전송"""
+        """streaming_payload를 기반으로 answer 이벤트를 청크 단위로 전송.
+        translate_to가 있으면 [TRANSLATION] 구분자 기준으로 ANSWER/TRANSLATION 이벤트 분리."""
         first_token_logged = False
+        translate_to = streaming_payload.get("translate_to")
+        DELIMITER = "[TRANSLATION]"
+        D_LEN = len(DELIMITER)
 
         def log_ttft():
             nonlocal first_token_logged
@@ -75,24 +77,63 @@ class SSEGraphAdapter:
                 logger.info(f"[Timing] TTFT: {time.perf_counter() - t_start:.2f}s")
                 first_token_logged = True
 
-        def send_text(text: str):
-            for i in range(0, len(text), _CHUNK_SIZE):
-                yield self._format_sse({"type": SSEType.ANSWER, "content": text[i:i + _CHUNK_SIZE]})
-
         if streaming_payload.get("precomputed"):
             content = self._normalize_markdown(streaming_payload.get("content", ""))
-            for i in range(0, len(content), _CHUNK_SIZE):
-                log_ttft()
-                yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
+            if translate_to and DELIMITER in content:
+                korean, _, translation = content.partition(DELIMITER)
+                korean = korean.strip()
+                translation = translation.strip()
+                for i in range(0, len(korean), _CHUNK_SIZE):
+                    log_ttft()
+                    yield self._format_sse({"type": SSEType.ANSWER, "content": korean[i:i + _CHUNK_SIZE]})
+                for i in range(0, len(translation), _CHUNK_SIZE):
+                    yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": translation[i:i + _CHUNK_SIZE]})
+            else:
+                for i in range(0, len(content), _CHUNK_SIZE):
+                    log_ttft()
+                    yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
         else:
             messages = streaming_payload.get("messages", [])
             max_tokens = streaming_payload.get("max_tokens", 2048)
 
+            accumulated = ""
+            in_translation = False
+
             async for token in stream_llm_tokens(messages, max_tokens):
                 if token:
                     token = re.sub(r"\*+", "", token)
+                    accumulated += token
+
+                    if not in_translation:
+                        idx = accumulated.find(DELIMITER)
+                        if idx != -1:
+                            before = accumulated[:idx].rstrip("\n")
+                            after = accumulated[idx + D_LEN:].lstrip("\n")
+                            if before:
+                                log_ttft()
+                                yield self._format_sse({"type": SSEType.ANSWER, "content": before})
+                            in_translation = True
+                            accumulated = after
+                            if accumulated and translate_to:
+                                yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
+                            accumulated = ""
+                        else:
+                            safe_len = max(0, len(accumulated) - D_LEN)
+                            if safe_len > 0:
+                                log_ttft()
+                                yield self._format_sse({"type": SSEType.ANSWER, "content": accumulated[:safe_len]})
+                                accumulated = accumulated[safe_len:]
+                    else:
+                        if translate_to and accumulated:
+                            yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
+                        accumulated = ""
+
+            if accumulated:
+                if in_translation and translate_to:
+                    yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
+                else:
                     log_ttft()
-                    yield self._format_sse({"type": SSEType.ANSWER, "content": token})
+                    yield self._format_sse({"type": SSEType.ANSWER, "content": accumulated})
 
     # ------------------------------------------------------------------
     # 파일 경로 해석 유틸리티
@@ -175,17 +216,6 @@ class SSEGraphAdapter:
         if streaming_payload:
             async for chunk in self._stream_answer_tokens(streaming_payload, t_start=t_start):
                 yield chunk
-        else:
-            # fallback: streaming_payload 없으면 기존 방식
-            messages = final_state.get("messages", [])
-            final_answer = None
-            for msg in reversed(messages):
-                if isinstance(msg, AIMessage):
-                    final_answer = msg.content
-                    break
-            if final_answer:
-                for i in range(0, len(final_answer), _CHUNK_SIZE):
-                    yield self._format_sse({"type": SSEType.ANSWER, "content": final_answer[i:i + _CHUNK_SIZE]})
 
     # ------------------------------------------------------------------
     # references만 SSE로 emit (번역 모드용)
@@ -267,8 +297,6 @@ class SSEGraphAdapter:
         initial_state = {
             "invoke_id": invoke_id,
             "original_query": user_query,
-            "messages": [HumanMessage(content=user_query)],
-            "rewritten_questions": [],
             "agent_answers": [],
             "filter_filename": filter_filename,
             "translate_to": translate_to,
@@ -294,8 +322,20 @@ class SSEGraphAdapter:
                 for i in range(0, len(content), _CHUNK_SIZE):
                     yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
                 if translate_to:
-                    async for chunk in self._stream_translation(content, translate_to):
-                        yield chunk
+                    cached_translation = cached.get("translations", {}).get(translate_to)
+                    if cached_translation:
+                        for i in range(0, len(cached_translation), _CHUNK_SIZE):
+                            yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": cached_translation[i:i + _CHUNK_SIZE]})
+                    else:
+                        translation_buffer = []
+                        async for chunk in self._stream_translation(content, translate_to):
+                            data = json.loads(chunk.decode("utf-8").removeprefix("data: ").strip())
+                            if data.get("type") == SSEType.TRANSLATION:
+                                translation_buffer.append(data.get("content", ""))
+                            yield chunk
+                        full_translation = "".join(translation_buffer)
+                        if full_translation:
+                            await answer_cache_service.add_translation(invoke_id, user_query, translate_to, full_translation)
                 yield self._format_sse({"type": SSEType.DONE})
                 return
 
@@ -307,12 +347,15 @@ class SSEGraphAdapter:
 
             if final_state:
                 answer_buffer = []
+                translation_buffer = []
 
                 async def _collecting_emit():
                     async for chunk in self._emit_final_answer(final_state, t_start=t_start):
                         data = json.loads(chunk.decode("utf-8").removeprefix("data: ").strip())
                         if data.get("type") == SSEType.ANSWER:
                             answer_buffer.append(data.get("content", ""))
+                        elif data.get("type") == SSEType.TRANSLATION:
+                            translation_buffer.append(data.get("content", ""))
                         yield chunk
 
                 async for chunk in _collecting_emit():
@@ -321,7 +364,6 @@ class SSEGraphAdapter:
                 # 캐시 저장 (관련 문서가 실제로 사용된 경우에만)
                 full_answer = "".join(answer_buffer)
                 if full_answer:
-                    # Langfuse: 스트리밍 답변 텍스트 기록 (저위험 질문은 call_llm을 거치지 않으므로 여기서 캡처)
                     try:
                         langfuse_context.update_current_observation(
                             input=user_query,
@@ -338,9 +380,9 @@ class SSEGraphAdapter:
                     if is_open and refs:
                         await answer_cache_service.set(invoke_id, user_query, full_answer, refs)
 
-                if translate_to and full_answer:
-                    async for chunk in self._stream_translation(full_answer, translate_to):
-                        yield chunk
+                full_translation = "".join(translation_buffer)
+                if full_translation and is_open and refs:
+                    await answer_cache_service.add_translation(invoke_id, user_query, translate_to, full_translation)
 
             yield self._format_sse({"type": SSEType.DONE})
 

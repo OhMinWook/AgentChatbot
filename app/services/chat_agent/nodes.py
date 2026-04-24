@@ -8,7 +8,6 @@ import time
 import json
 from typing import Dict, Any
 
-from langchain_core.messages import HumanMessage, AIMessage
 from app.core.langfuse_client import observe, langfuse  # langfuse 비활성화 스텁
 
 from app.services.chat_agent.graph_state import MainState
@@ -30,21 +29,18 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
-# ── analyze_rewrite ───────────────────────────────────────────────────────────
-
 # ── process_question ──────────────────────────────────────────────────────────
 
 @observe()
 async def process_question_node(state: MainState) -> Dict[str, Any]:
     """질문 처리 노드 - 문서 검색 및 답변 생성"""
     invoke_id = state.get("invoke_id", "")
-    rewritten_questions = state.get("rewritten_questions", [])
     original_query = state.get("original_query", "")
     filter_filename = state.get("filter_filename", None)
     retry_count = state.get("retry_count", 0)
 
-    questions = rewritten_questions if rewritten_questions else [original_query]
-    if not questions or not questions[0]:
+    questions = [original_query]
+    if not original_query:
         return {"agent_answers": []}
 
     search_invoke_id = invoke_id if filter_filename else settings.GLOBAL_INVOKE_ID
@@ -111,7 +107,25 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
         logger.debug(f"[Process] Langfuse reranker_score 기록 실패 (무시): {e}")
 
     logger.info(f"[Process] {len(all_answers)}개 답변 완료")
-    return {"agent_answers": all_answers}
+
+    # streaming_payload 구성
+    answer = all_answers[0]
+    answer_text = answer.get("answer", "")
+    stream_messages = answer.get("messages")
+
+    if answer_text:
+        logger.info("[Process] 고위험 답변 precomputed 설정")
+        streaming_payload = {"precomputed": True, "content": answer_text, "translate_to": translate_to}
+    else:
+        logger.info("[Process] 저위험 답변 스트리밍 준비")
+        streaming_payload = {
+            "precomputed": False,
+            "messages": stream_messages,
+            "max_tokens": settings.DEFAULT_MAX_TOKENS,
+            "translate_to": translate_to
+        }
+
+    return {"agent_answers": all_answers, "streaming_payload": streaming_payload}
 
 
 # ── verify_answer ─────────────────────────────────────────────────────────────
@@ -142,7 +156,7 @@ async def verify_answer_node(state: MainState) -> Dict[str, Any]:
                     answer=answer.get("answer", "")
                 )}
             ],
-            max_tokens=256,
+            max_tokens=1024,
             json_schema=VERIFY_ANSWER_JSON_SCHEMA
         )
         try:
@@ -187,44 +201,11 @@ async def verify_answer_node(state: MainState) -> Dict[str, Any]:
         return {
             "verification_passed": False,
             "retry_count": retry_count + 1,
-            "agent_answers": []
+            "agent_answers": [],
+            "streaming_payload": None
         }
 
     logger.warning(f"[Verify] 재시도 횟수 초과 ({retry_count}회) - 그대로 사용")
     return {"verification_passed": True}
 
-
-# ── aggregate ─────────────────────────────────────────────────────────────────
-
-@observe()
-async def aggregate_node(state: MainState) -> Dict[str, Any]:
-    """답변 통합 노드 - streaming_payload 구성"""
-    original_query = state.get("original_query", "")
-    agent_answers = state.get("agent_answers", [])
-
-    if not agent_answers:
-        fallback = "관련 정보를 찾지 못했습니다."
-        return {
-            "messages": [AIMessage(content=fallback)],
-            "streaming_payload": {"precomputed": True, "content": fallback}
-        }
-
-    if len(agent_answers) == 1:
-        answer = agent_answers[0]
-        stream_messages = answer.get("messages")
-        if stream_messages:
-            logger.info("[Aggregate] 단일 답변 스트리밍 준비")
-            return {
-                "messages": [AIMessage(content="")],
-                "streaming_payload": {
-                    "precomputed": False,
-                    "messages": stream_messages,
-                    "max_tokens": settings.DEFAULT_MAX_TOKENS
-                }
-            }
-        answer_text = answer.get("answer", "")
-        return {
-            "messages": [AIMessage(content=answer_text)],
-            "streaming_payload": {"precomputed": True, "content": answer_text}
-        }
 

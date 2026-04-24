@@ -218,7 +218,7 @@ class QdrantService:
         sparse_vector: Dict[str, List],
         top_k: int = 30,
         filter_source: Optional[str] = None,
-        dense_weight: float = 0.8,
+        dense_weight: float = settings.DENSE_WEIGHT,
     ) -> List[SearchResult]:
         """
         Hybrid 검색 (Dense + Sparse 가중 합계, 정규화 적용)
@@ -312,9 +312,8 @@ class QdrantService:
                 if pid in payload_map
             ]
         except UnexpectedResponse as e:
-            logger.error(f"[Qdrant] Hybrid search failed: {e}")
-            # Fallback to dense-only search
-            logger.warning("[Qdrant] Falling back to dense-only search")
+            logger.error(f"[Qdrant] Hybrid search failed (invoke_id={invoke_id}, filter={filter_source}): {e}")
+            logger.warning("[Qdrant] Sparse 신호 손실 — Dense-only 검색으로 fallback")
             return await self.search(invoke_id, dense_embedding, top_k, filter_source)
 
     async def get_chunks_by_ids(

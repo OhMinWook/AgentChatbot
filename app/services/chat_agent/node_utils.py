@@ -80,6 +80,15 @@ async def call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json_
         payload = build_chat_payload(messages, max_tokens=max_tokens, json_schema=json_schema)
         response = await llm_client.chat_completions(payload)
         content = llm_client.extract_content(response)
+        if json_schema:
+            think_end = content.rfind("</think>")
+            if think_end != -1:
+                content = content[think_end + len("</think>"):].strip()
+            else:
+                # 닫는 태그 없는 경우: <think> ~ 첫 번째 { 이전까지 제거
+                content = re.sub(r"<think>[^{]*", "", content, flags=re.DOTALL).strip()
+            match = re.search(r"\{.*\}", content, flags=re.DOTALL)
+            return match.group(0) if match else content
         return strip_think_blocks(content)
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
@@ -88,14 +97,18 @@ async def call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json_
 
 # ── process_question 헬퍼 ────────────────────────────────────────────────────
 
-def build_agent_messages(agent_prompt, question: str, doc_res: Dict) -> List[Dict[str, str]] | None:
+def build_agent_messages(agent_prompt, question: str, doc_res: Dict, translate_to: str = None) -> List[Dict[str, str]] | None:
     """검색 결과로부터 LLM 메시지를 구성한다. context가 없으면 None."""
     doc_context = doc_res.get("context", "")
     if not doc_context:
         return None
+    user_content = agent_prompt.user.format(context=doc_context, question=question)
+    if translate_to:
+        lang_name = _TRANSLATE_LANG_NAMES.get(translate_to, translate_to)
+        user_content += f'\n\n답변 작성 후 반드시 새 줄에 "[TRANSLATION]"을 출력하고, 이어서 위 답변 전체를 {lang_name}으로 번역하여 출력하세요.'
     return [
         {"role": "system", "content": agent_prompt.system},
-        {"role": "user", "content": agent_prompt.user.format(context=doc_context, question=question)}
+        {"role": "user", "content": user_content}
     ]
 
 
@@ -115,7 +128,7 @@ async def generate_single_answer(agent_prompt, idx: int, question: str, doc_res:
     references = doc_res.get("references", [])
     rag_docs = doc_res.get("results", [])
     context = doc_res.get("context", "")
-    messages = build_agent_messages(agent_prompt, question, doc_res)
+    messages = build_agent_messages(agent_prompt, question, doc_res, translate_to=translate_to)
 
     if messages is None:
         return {

@@ -2,9 +2,8 @@
 LangGraph State 클래스 정의
 """
 
-from typing import List, Dict, Any, Optional, Annotated
+from typing import List, Optional, Annotated
 from typing_extensions import TypedDict
-from langgraph.graph import MessagesState
 
 
 def accumulate_or_reset(left: List[dict], right: List[dict]) -> List[dict]:
@@ -14,24 +13,15 @@ def accumulate_or_reset(left: List[dict], right: List[dict]) -> List[dict]:
     return left + right
 
 
-class MainState(MessagesState):
+class MainState(TypedDict, total=False):
     """메인 그래프 상태"""
-    invoke_id: str = ""
-    original_query: str = ""
-    rewritten_questions: List[str] = []
-    agent_answers: Annotated[List[dict], accumulate_or_reset] = []
-    filter_filename: Optional[str] = None  # 특정 파일 검색 필터
-    translate_to: Optional[str] = None  # 번역 언어 코드 (en/zh/ja), None이면 번역 없음
-    streaming_payload: Optional[dict] = None  # SSE adapter에서 스트리밍 생성에 사용
-    # 할루시네이션 검증
-    verification_passed: Optional[bool] = None  # None=미검증, True=통과, False=실패
-    retry_count: int = 0  # 검증 실패 후 재시도 횟수
-
-
-class AgentSubState(TypedDict):
-    """개별 에이전트 서브그래프 상태"""
     invoke_id: str
-    question: str
-    question_index: int
-    final_answer: str
-    search_results: List[Dict[str, Any]]
+    original_query: str
+    agent_answers: Annotated[List[dict], accumulate_or_reset]
+    filter_filename: Optional[str]  # 특정 파일 검색 필터
+    translate_to: Optional[str]  # 번역 언어 코드 (en/zh/ja), None이면 번역 없음
+    streaming_payload: Optional[dict]  # SSE adapter에서 스트리밍 생성에 사용
+    # 할루시네이션 검증
+    verification_passed: Optional[bool]  # None=미검증, True=통과, False=실패
+    retry_count: int  # 검증 실패 후 재시도 횟수
+

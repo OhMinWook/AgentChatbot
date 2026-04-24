@@ -31,6 +31,8 @@ class Settings(BaseModel):
 
     # [검색 설정]
     SEARCH_TOP_K: int = 4
+    DENSE_WEIGHT: float = float(os.getenv("DENSE_WEIGHT", "0.8"))
+    RERANK_CANDIDATES: int = int(os.getenv("RERANK_CANDIDATES", "64"))
 
     # [청크 설정 - RAG 문서 분할 (문자 기준)]
     CHUNK_SIZE: int = 700

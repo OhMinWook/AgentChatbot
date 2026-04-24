@@ -8,25 +8,47 @@ import asyncio
 import logging
 from html import escape as html_escape
 from typing import List, Dict, Any
+from app.core.langfuse_client import observe  # langfuse 비활성화 스텁
 from app.services.api_clients.model_server_client import model_server_client
 from app.services.rag.qdrant_service import qdrant_service
 from app.services.rag.sparse_encoder import sparse_encoder
 from app.services.rag.text_utils import add_source_prefix
 from app.core.config import settings
+from app.services.agent_base.tool import BaseTool
 
 logger = logging.getLogger(__name__)
 
-# Reranker 후보 수 (Qdrant에서 가져올 개수)
-RERANK_CANDIDATES = 64
+# Reranker 후보 수 (Qdrant에서 가져올 개수) — config.py RERANK_CANDIDATES로 관리
+RERANK_CANDIDATES = settings.RERANK_CANDIDATES
 
 
-
-class SearchTool:
-    """문서 검색 도구"""
+class SearchTool(BaseTool):
+    """문서 검색 도구 — Hybrid 검색 파이프라인 (Dense + Sparse → RRF → Reranker)"""
 
     def __init__(self, invoke_id: str):
         self.invoke_id = invoke_id
 
+    @property
+    def name(self) -> str:
+        return "search_tool"
+
+    async def execute(self, input_text: str, **kwargs) -> Dict[str, Any]:
+        """BaseTool 인터페이스 구현 — search()로 위임"""
+        return await self.search(
+            query=input_text,
+            top_k=kwargs.get("top_k"),
+            filter_filename=kwargs.get("filter_filename"),
+        )
+
+    async def execute_batch(self, inputs: List[str], **kwargs) -> List[Dict[str, Any]]:
+        """BaseTool 인터페이스 구현 — search_batch()로 위임"""
+        return await self.search_batch(
+            queries=inputs,
+            top_k=kwargs.get("top_k"),
+            filter_filename=kwargs.get("filter_filename"),
+        )
+
+    @observe()
     async def search(self, query: str, top_k: int = None, filter_filename: str = None) -> Dict[str, Any]:
         """
         문서 검색 수행 (Hybrid: Dense + Sparse → RRF → Reranker)
@@ -46,6 +68,7 @@ class SearchTool:
         # 1. Dense 쿼리 임베딩 생성
         embeddings = await model_server_client.embed_texts([query], is_query=True)
         if not embeddings:
+            logger.error(f"[Search] 임베딩 생성 실패 — 모델 서버 응답 없음 (query: {query[:50]})")
             return {"context": None, "references": [], "results": []}
         query_embedding = embeddings[0]
 
@@ -117,9 +140,9 @@ class SearchTool:
             if len(results) >= k:
                 break
 
-            # 점수 필터링 (최소 2개 보장, 이후 임계값 미만 제외)
+            # 점수 필터링 (최소 N개 보장, 이후 임계값 미만 제외)
             score = r.get("score", 0.0)
-            if len(results) >= 2 and score < settings.RERANK_SCORE_THRESHOLD:
+            if len(results) >= settings.RERANK_MIN_RESULTS and score < settings.RERANK_SCORE_THRESHOLD:
                 logger.debug(f"[Search] 낮은 점수 스킵: {score:.3f}")
                 continue
 
@@ -130,7 +153,7 @@ class SearchTool:
             candidate = candidates[orig_idx]
             doc_id = candidate.doc_id
 
-            # 이미 선택된 청크의 인접 청크면 스킵
+            # 이미 선택된 청크의 인접 청크면 항상 스킵
             if doc_id in adjacent_ids:
                 logger.debug(f"[Search] 인접 청크 스킵: {doc_id}")
                 continue
@@ -216,6 +239,7 @@ class SearchTool:
 
             expanded_doc = doc.copy()
             expanded_doc["content"] = content + appended_content
+            expanded_doc["metadata"] = {**doc.get("metadata", {}), "next_chunk_id": next_id}
             expanded_results.append(expanded_doc)
 
         return expanded_results

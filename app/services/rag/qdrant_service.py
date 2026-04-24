@@ -4,6 +4,7 @@ Qdrant Vector Database Service
 문서 임베딩 저장 및 벡터 검색을 담당합니다.
 """
 
+import asyncio
 import logging
 import uuid
 from typing import List, Dict, Optional, Any
@@ -217,7 +218,7 @@ class QdrantService:
         sparse_vector: Dict[str, List],
         top_k: int = 30,
         filter_source: Optional[str] = None,
-        dense_weight: float = 0.8,
+        dense_weight: float = settings.DENSE_WEIGHT,
     ) -> List[SearchResult]:
         """
         Hybrid 검색 (Dense + Sparse 가중 합계, 정규화 적용)
@@ -238,25 +239,25 @@ class QdrantService:
         try:
             query_filter = self._build_filter(invoke_id, filter_source)
 
-            # 1. Dense 검색
-            dense_results = await self.client.query_points(
-                collection_name=settings.QDRANT_COLLECTION,
-                query=dense_embedding,
-                using="dense",
-                query_filter=query_filter,
-                limit=top_k,
-            )
-
-            # 2. Sparse 검색
-            sparse_results = await self.client.query_points(
-                collection_name=settings.QDRANT_COLLECTION,
-                query=models.SparseVector(
-                    indices=sparse_vector["indices"],
-                    values=sparse_vector["values"],
+            # 1. Dense + Sparse 병렬 검색
+            dense_results, sparse_results = await asyncio.gather(
+                self.client.query_points(
+                    collection_name=settings.QDRANT_COLLECTION,
+                    query=dense_embedding,
+                    using="dense",
+                    query_filter=query_filter,
+                    limit=top_k,
                 ),
-                using="sparse",
-                query_filter=query_filter,
-                limit=top_k,
+                self.client.query_points(
+                    collection_name=settings.QDRANT_COLLECTION,
+                    query=models.SparseVector(
+                        indices=sparse_vector["indices"],
+                        values=sparse_vector["values"],
+                    ),
+                    using="sparse",
+                    query_filter=query_filter,
+                    limit=top_k,
+                ),
             )
 
             # 3. Dense는 코사인 유사도(0~1), Sparse만 Min-Max 정규화
@@ -311,9 +312,8 @@ class QdrantService:
                 if pid in payload_map
             ]
         except UnexpectedResponse as e:
-            logger.error(f"[Qdrant] Hybrid search failed: {e}")
-            # Fallback to dense-only search
-            logger.warning("[Qdrant] Falling back to dense-only search")
+            logger.error(f"[Qdrant] Hybrid search failed (invoke_id={invoke_id}, filter={filter_source}): {e}")
+            logger.warning("[Qdrant] Sparse 신호 손실 — Dense-only 검색으로 fallback")
             return await self.search(invoke_id, dense_embedding, top_k, filter_source)
 
     async def get_chunks_by_ids(

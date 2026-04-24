@@ -6,17 +6,18 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
-from typing import AsyncGenerator, Dict, Any, Optional, Tuple, List
+from typing import AsyncGenerator, Dict, Any, Optional
 
-from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.checkpoint.memory import MemorySaver
-
+from app.core.langfuse_client import observe, langfuse, langfuse_context  # langfuse 비활성화 스텁
 from app.core.config import settings
 from app.services.chat_agent.graph import create_rag_graph
-from app.services.chat_agent.nodes import stream_llm_tokens
+from app.services.chat_agent.node_utils import stream_llm_tokens, call_llm
 from app.services.rag.qdrant_service import qdrant_service
+from app.services.utils.answer_cache_service import answer_cache_service
 from app.services.utils.download_service import download_service
 from app.services.utils.sse_utils import SSEType
 
@@ -25,65 +26,114 @@ logger = logging.getLogger(__name__)
 # precomputed 답변을 작은 청크로 나눌 때 사용할 크기
 _CHUNK_SIZE = 6
 
+_TRANSLATE_LANG_MAP = {
+    "en": "English",
+    "zh": "Chinese (Simplified)",
+    "ja": "Japanese",
+}
+
 # pending_threads TTL (초)
-_PENDING_THREAD_TTL = 600  # 10분
-
-
 class SSEGraphAdapter:
     """LangGraph와 SSE 스트리밍을 연결하는 어댑터"""
 
     def __init__(self):
         self.checkpointer = MemorySaver()
         self.graph = create_rag_graph(self.checkpointer)
-        self._pending_threads: Dict[str, Tuple[str, float]] = {}  # invoke_id → (thread_id, timestamp)
 
     def _generate_thread_id(self, invoke_id: str) -> str:
         return f"{invoke_id}_{uuid.uuid4().hex[:8]}"
 
-    def cancel_pending(self, invoke_id: str):
-        """대기 중인 명확화 세션을 폐기한다. 새 요청이 들어왔을 때 호출."""
-        pending = self._pending_threads.pop(invoke_id, None)
-        if pending:
-            old_thread, _ = pending
-            # MemorySaver 내부 체크포인트 정리
-            self.checkpointer.storage.pop(old_thread, None)
-            logger.info(f"[HITL] 대기 세션 폐기: {old_thread} (invokeId: {invoke_id})")
-        # 만료된 세션들도 정리
-        self._cleanup_expired_pending()
+    def cancel_pending(self, invoke_id: str) -> None:
+        """대기 중인 human-in-the-loop 세션 폐기 (현재 MemorySaver 사용으로 별도 처리 불필요)"""
+        pass
 
-    def _cleanup_expired_pending(self):
-        """TTL이 만료된 pending 세션들을 정리"""
-        now = time.time()
-        expired_keys = [
-            invoke_id for invoke_id, (thread_id, ts) in self._pending_threads.items()
-            if now - ts > _PENDING_THREAD_TTL
-        ]
-        for invoke_id in expired_keys:
-            pending = self._pending_threads.pop(invoke_id, None)
-            if pending:
-                thread_id, _ = pending
-                self.checkpointer.storage.pop(thread_id, None)
-                logger.info(f"[HITL] 만료 세션 정리: {thread_id} (invokeId: {invoke_id})")
+    # ------------------------------------------------------------------
+    # 마크다운 정규화
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_markdown(text: str) -> str:
+        text = re.sub(r"\*+", "", text)  # ** 제거
+        text = re.sub(r"\n{3,}", "\n\n", text)  # 연속 빈 줄 → 최대 2줄
+        text = text.strip()
+        return text
+
 
     # ------------------------------------------------------------------
     # 토큰 스트리밍 헬퍼
     # ------------------------------------------------------------------
     async def _stream_answer_tokens(
-        self, streaming_payload: dict
+        self, streaming_payload: dict, t_start: float = None
     ) -> AsyncGenerator[bytes, None]:
-        """streaming_payload를 기반으로 answer 이벤트를 청크 단위로 전송"""
+        """streaming_payload를 기반으로 answer 이벤트를 청크 단위로 전송.
+        translate_to가 있으면 [TRANSLATION] 구분자 기준으로 ANSWER/TRANSLATION 이벤트 분리."""
+        first_token_logged = False
+        translate_to = streaming_payload.get("translate_to")
+        DELIMITER = "[TRANSLATION]"
+        D_LEN = len(DELIMITER)
+
+        def log_ttft():
+            nonlocal first_token_logged
+            if not first_token_logged and t_start:
+                logger.info(f"[Timing] TTFT: {time.perf_counter() - t_start:.2f}s")
+                first_token_logged = True
+
         if streaming_payload.get("precomputed"):
-            # 단일 답변: 이미 완성된 텍스트를 작은 청크로 나눠서 스트리밍 효과
-            content = streaming_payload.get("content", "")
-            for i in range(0, len(content), _CHUNK_SIZE):
-                chunk = content[i:i + _CHUNK_SIZE]
-                yield self._format_sse({"type": SSEType.ANSWER, "content": chunk})
+            content = self._normalize_markdown(streaming_payload.get("content", ""))
+            if translate_to and DELIMITER in content:
+                korean, _, translation = content.partition(DELIMITER)
+                korean = korean.strip()
+                translation = translation.strip()
+                for i in range(0, len(korean), _CHUNK_SIZE):
+                    log_ttft()
+                    yield self._format_sse({"type": SSEType.ANSWER, "content": korean[i:i + _CHUNK_SIZE]})
+                for i in range(0, len(translation), _CHUNK_SIZE):
+                    yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": translation[i:i + _CHUNK_SIZE]})
+            else:
+                for i in range(0, len(content), _CHUNK_SIZE):
+                    log_ttft()
+                    yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
         else:
-            # 복수 답변: vLLM SSE 스트리밍으로 실시간 토큰 전송
             messages = streaming_payload.get("messages", [])
             max_tokens = streaming_payload.get("max_tokens", 2048)
+
+            accumulated = ""
+            in_translation = False
+
             async for token in stream_llm_tokens(messages, max_tokens):
-                yield self._format_sse({"type": SSEType.ANSWER, "content": token})
+                if token:
+                    token = re.sub(r"\*+", "", token)
+                    accumulated += token
+
+                    if not in_translation:
+                        idx = accumulated.find(DELIMITER)
+                        if idx != -1:
+                            before = accumulated[:idx].rstrip("\n")
+                            after = accumulated[idx + D_LEN:].lstrip("\n")
+                            if before:
+                                log_ttft()
+                                yield self._format_sse({"type": SSEType.ANSWER, "content": before})
+                            in_translation = True
+                            accumulated = after
+                            if accumulated and translate_to:
+                                yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
+                            accumulated = ""
+                        else:
+                            safe_len = max(0, len(accumulated) - D_LEN)
+                            if safe_len > 0:
+                                log_ttft()
+                                yield self._format_sse({"type": SSEType.ANSWER, "content": accumulated[:safe_len]})
+                                accumulated = accumulated[safe_len:]
+                    else:
+                        if translate_to and accumulated:
+                            yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
+                        accumulated = ""
+
+            if accumulated:
+                if in_translation and translate_to:
+                    yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
+                else:
+                    log_ttft()
+                    yield self._format_sse({"type": SSEType.ANSWER, "content": accumulated})
 
     # ------------------------------------------------------------------
     # 파일 경로 해석 유틸리티
@@ -109,7 +159,7 @@ class SSEGraphAdapter:
     # 공통: 그래프 실행 결과에서 답변/레퍼런스 SSE 전송
     # ------------------------------------------------------------------
     async def _emit_final_answer(
-        self, final_state: dict
+        self, final_state: dict, t_start: float = None
     ) -> AsyncGenerator[bytes, None]:
         """final_state에서 references + 토큰 스트리밍 답변을 SSE로 emit"""
         streaming_payload = final_state.get("streaming_payload")
@@ -164,33 +214,80 @@ class SSEGraphAdapter:
 
         # 토큰 스트리밍 답변
         if streaming_payload:
-            async for chunk in self._stream_answer_tokens(streaming_payload):
+            async for chunk in self._stream_answer_tokens(streaming_payload, t_start=t_start):
                 yield chunk
-        else:
-            # fallback: streaming_payload 없으면 기존 방식
-            messages = final_state.get("messages", [])
-            final_answer = None
-            for msg in reversed(messages):
-                if isinstance(msg, AIMessage):
-                    final_answer = msg.content
-                    break
-            if final_answer:
-                for i in range(0, len(final_answer), _CHUNK_SIZE):
-                    yield self._format_sse({"type": SSEType.ANSWER, "content": final_answer[i:i + _CHUNK_SIZE]})
+
+    # ------------------------------------------------------------------
+    # references만 SSE로 emit (번역 모드용)
+    # ------------------------------------------------------------------
+    async def _emit_references(self, final_state: dict) -> AsyncGenerator[bytes, None]:
+        """references + rag_documents SSE emit (한국어 스트리밍 없이)"""
+        agent_answers = final_state.get("agent_answers", [])
+        all_refs = []
+        all_rag_docs = []
+        for ans in agent_answers:
+            for ref in ans.get("sources", []):
+                if ref not in all_refs:
+                    all_refs.append(ref)
+            for doc in ans.get("rag_docs", []):
+                all_rag_docs.append(doc)
+
+        is_open_mode = final_state.get("filter_filename") is None
+        invoke_id = final_state.get("invoke_id", "")
+
+        if all_refs and is_open_mode:
+            sources = [ref.get("source") for ref in all_refs if ref.get("source")]
+            if sources:
+                metadata_map = await qdrant_service.get_document_metadata_by_source(invoke_id, sources)
+                for ref in all_refs:
+                    source = ref.get("source")
+                    if source and source in metadata_map:
+                        metadata = metadata_map[source]
+                        file_path = self._resolve_file_path(invoke_id, source, metadata)
+                        if file_path:
+                            link_info = download_service.create_download_link_from_path(
+                                file_path=file_path, filename=source,
+                                expires_in_seconds=3600, one_time=False
+                            )
+                            if link_info:
+                                ref["download_url"] = link_info["download_url"]
+
+        if all_refs:
+            yield self._format_sse({"type": SSEType.REFERENCES, "docs": all_refs})
+        if all_rag_docs:
+            yield self._format_sse({"type": SSEType.RAG_DOCUMENTS, "documents": all_rag_docs})
+
+    # ------------------------------------------------------------------
+    # 번역 스트리밍 헬퍼
+    # ------------------------------------------------------------------
+    async def _stream_translation(self, text: str, translate_to: str) -> AsyncGenerator[bytes, None]:
+        """한국어 답변을 지정 언어로 번역 후 SSE 스트리밍"""
+        lang_name = _TRANSLATE_LANG_MAP.get(translate_to, translate_to)
+        messages = [
+            {
+                "role": "system",
+                "content": f"Translate the following Korean text to {lang_name}. Output only the translation without any explanations or additional text."
+            },
+            {"role": "user", "content": text}
+        ]
+        async for token in stream_llm_tokens(messages, max_tokens=settings.DEFAULT_MAX_TOKENS):
+            if token:
+                yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": token})
 
     # ------------------------------------------------------------------
     # invoke_with_sse
     # ------------------------------------------------------------------
+    @observe(capture_input=False, capture_output=False)
     async def invoke_with_sse(
         self,
         invoke_id: str,
         user_query: str,
         thread_id: Optional[str] = None,
-        filter_filename: Optional[str] = None
+        filter_filename: Optional[str] = None,
+        translate_to: Optional[str] = None
     ) -> AsyncGenerator[bytes, None]:
         """그래프 실행 및 SSE 스트리밍"""
-        # 기존 명확화 대기 세션이 있으면 폐기
-        self.cancel_pending(invoke_id)
+        t_start = time.perf_counter()
 
         if not thread_id:
             thread_id = self._generate_thread_id(invoke_id)
@@ -200,155 +297,98 @@ class SSEGraphAdapter:
         initial_state = {
             "invoke_id": invoke_id,
             "original_query": user_query,
-            "messages": [HumanMessage(content=user_query)],
-            "question_is_clear": False,
-            "conversation_summary": "",
-            "rewritten_questions": [],
             "agent_answers": [],
-            "clarification_message": None,
-            "awaiting_human_input": False,
             "filter_filename": filter_filename,
+            "translate_to": translate_to,
             "streaming_payload": None
         }
 
         try:
-            yield self._format_sse({"type": SSEType.PROGRESS, "step": "질문을 확인하고 있습니다"})
+            # 캐시 확인 (오픈 챗에서만)
+            is_open = filter_filename is None
+            cached = await answer_cache_service.get(invoke_id, user_query) if is_open else None
+            if cached:
+                if cached.get("references"):
+                    yield self._format_sse({"type": SSEType.REFERENCES, "docs": cached["references"]})
+                content = cached.get("answer", "")
+                try:
+                    langfuse_context.update_current_observation(
+                        input=user_query,
+                        output=content,
+                        metadata={"cache_hit": True},
+                    )
+                except Exception:
+                    pass
+                for i in range(0, len(content), _CHUNK_SIZE):
+                    yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
+                if translate_to:
+                    cached_translation = cached.get("translations", {}).get(translate_to)
+                    if cached_translation:
+                        for i in range(0, len(cached_translation), _CHUNK_SIZE):
+                            yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": cached_translation[i:i + _CHUNK_SIZE]})
+                    else:
+                        translation_buffer = []
+                        async for chunk in self._stream_translation(content, translate_to):
+                            data = json.loads(chunk.decode("utf-8").removeprefix("data: ").strip())
+                            if data.get("type") == SSEType.TRANSLATION:
+                                translation_buffer.append(data.get("content", ""))
+                            yield chunk
+                        full_translation = "".join(translation_buffer)
+                        if full_translation:
+                            await answer_cache_service.add_translation(invoke_id, user_query, translate_to, full_translation)
+                yield self._format_sse({"type": SSEType.DONE})
+                return
+
+            yield self._format_sse({"type": SSEType.PROGRESS, "step": "답변을 준비하고 있습니다"})
 
             final_state = None
-            sent_progress = set()  # 중복 방지
-
             async for event in self.graph.astream(initial_state, config, stream_mode="values"):
                 final_state = event
 
-                # 대화 요약 진행 (1회만)
-                if event.get("conversation_summary") and "summary" not in sent_progress:
-                    sent_progress.add("summary")
-                    yield self._format_sse({"type": SSEType.PROGRESS, "step": "이전 대화 내용을 확인하고 있습니다"})
-
-                # 질문 분석 완료 (1회만)
-                if event.get("rewritten_questions") and "analyzed" not in sent_progress:
-                    sent_progress.add("analyzed")
-                    yield self._format_sse({
-                        "type": SSEType.PROGRESS,
-                        "step": "질문 분석 완료"
-                    })
-
             if final_state:
-                if final_state.get("awaiting_human_input"):
-                    async for chunk in self._handle_clarification(
-                        invoke_id, thread_id, final_state, "질문을 더 구체적으로 해주세요."
-                    ):
-                        yield chunk
-                    return
+                answer_buffer = []
+                translation_buffer = []
 
-                async for chunk in self._emit_final_answer(final_state):
+                async def _collecting_emit():
+                    async for chunk in self._emit_final_answer(final_state, t_start=t_start):
+                        data = json.loads(chunk.decode("utf-8").removeprefix("data: ").strip())
+                        if data.get("type") == SSEType.ANSWER:
+                            answer_buffer.append(data.get("content", ""))
+                        elif data.get("type") == SSEType.TRANSLATION:
+                            translation_buffer.append(data.get("content", ""))
+                        yield chunk
+
+                async for chunk in _collecting_emit():
                     yield chunk
+
+                # 캐시 저장 (관련 문서가 실제로 사용된 경우에만)
+                full_answer = "".join(answer_buffer)
+                if full_answer:
+                    try:
+                        langfuse_context.update_current_observation(
+                            input=user_query,
+                            output=full_answer,
+                        )
+                    except Exception:
+                        pass
+
+                    refs = []
+                    for ans in final_state.get("agent_answers", []):
+                        for ref in ans.get("sources", []):
+                            if ref not in refs:
+                                refs.append(ref)
+                    if is_open and refs:
+                        await answer_cache_service.set(invoke_id, user_query, full_answer, refs)
+
+                full_translation = "".join(translation_buffer)
+                if full_translation and is_open and refs:
+                    await answer_cache_service.add_translation(invoke_id, user_query, translate_to, full_translation)
 
             yield self._format_sse({"type": SSEType.DONE})
 
         except Exception as e:
             logger.exception(f"Graph execution error: {e}")
             yield self._format_sse({"type": SSEType.ERROR, "message": str(e)})
-
-    # ------------------------------------------------------------------
-    # continue_with_sse
-    # ------------------------------------------------------------------
-    async def continue_with_sse(
-        self,
-        invoke_id: str,
-        thread_id: str,
-        human_response: str
-    ) -> AsyncGenerator[bytes, None]:
-        """Human-in-the-loop 후 그래프 재개"""
-        config = {"configurable": {"thread_id": thread_id}}
-
-        try:
-            # 이미 다른 요청에 의해 폐기된 세션인지 확인
-            pending = self._pending_threads.get(invoke_id)
-            if not pending or pending[0] != thread_id:
-                yield self._format_sse({
-                    "type": SSEType.ERROR,
-                    "message": "세션이 만료되었습니다. 새로 질문해 주세요."
-                })
-                return
-
-            # TTL 만료 체크
-            _, ts = pending
-            if time.time() - ts > _PENDING_THREAD_TTL:
-                self._pending_threads.pop(invoke_id, None)
-                self.checkpointer.storage.pop(thread_id, None)
-                yield self._format_sse({
-                    "type": SSEType.ERROR,
-                    "message": "세션이 만료되었습니다. 새로 질문해 주세요."
-                })
-                return
-
-            # 정상 재개 - pending 해제
-            self._pending_threads.pop(invoke_id, None)
-
-            current_state = await self.graph.aget_state(config)
-
-            if not current_state or not current_state.values:
-                yield self._format_sse({
-                    "type": SSEType.ERROR,
-                    "message": "세션을 찾을 수 없습니다."
-                })
-                return
-
-            # rewritten 쿼리 우선 사용, 없으면 original_query
-            rewritten = current_state.values.get("rewritten_questions", [])
-            base_query = rewritten[0] if rewritten else current_state.values.get("original_query", "")
-            combined_query = f"{base_query} {human_response}" if base_query else human_response
-
-            await self.graph.aupdate_state(
-                config,
-                {
-                    "messages": [HumanMessage(content=combined_query)],
-                    "original_query": combined_query,
-                    "awaiting_human_input": False,
-                    "streaming_payload": None
-                }
-            )
-
-            yield self._format_sse({"type": SSEType.PROGRESS, "step": "답변을 준비하고 있습니다"})
-
-            final_state = None
-            async for event in self.graph.astream(None, config, stream_mode="values"):
-                final_state = event
-
-            if final_state: 
-                if final_state.get("awaiting_human_input"):
-                    async for chunk in self._handle_clarification(
-                        invoke_id, thread_id, final_state, "조금 더 구체적으로 설명해 주세요."
-                    ):
-                        yield chunk
-                    return
-
-                async for chunk in self._emit_final_answer(final_state):
-                    yield chunk
-
-            yield self._format_sse({"type": SSEType.DONE})
-
-        except Exception as e:
-            logger.exception(f"Graph continuation error: {e}")
-            yield self._format_sse({"type": SSEType.ERROR, "message": str(e)})
-
-    # 사용자 입력이 필요한 상태를 등록하고 그 사실을 SSE로 클라이언트에게 알리는 역할 헬퍼
-    async def _handle_clarification(
-        self,
-        invoke_id: str,
-        thread_id: str,
-        final_state: dict,
-        default_message: str,
-    ) -> AsyncGenerator[bytes, None]:
-        """명확화 대기 상태 등록 및 SSE 이벤트 전송"""
-        self._pending_threads[invoke_id] = (thread_id, time.time())
-        clarification = final_state.get("clarification_message", default_message)
-        yield self._format_sse({
-            "type": SSEType.CLARIFICATION,
-            "message": clarification,
-            "thread_id": thread_id
-        })
 
     def _format_sse(self, data: Dict[str, Any]) -> bytes:
         json_str = json.dumps(data, ensure_ascii=False)

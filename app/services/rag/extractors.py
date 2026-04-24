@@ -179,6 +179,9 @@ class FileTextExtractor:
 
     def convert_sync(self, file_path: str) -> Optional[str]:
         """MarkItDown 동기 변환 (asyncio.to_thread 사용 시)"""
+        _, ext = os.path.splitext(file_path)
+        if ext.lower() == ".txt":
+            return self._read_text_file(file_path)
         if self._markitdown is None:
             return None
         try:
@@ -187,6 +190,20 @@ class FileTextExtractor:
         except Exception as e:
             logger.error(f"[Extractor] MarkItDown 변환 오류: {e}")
             return None
+
+    @staticmethod
+    def _read_text_file(file_path: str) -> Optional[str]:
+        """TXT 파일을 인코딩 자동 감지하여 읽기"""
+        for encoding in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
+            try:
+                with open(file_path, "r", encoding=encoding) as f:
+                    text = f.read()
+                if text.strip():
+                    return text
+            except (UnicodeDecodeError, LookupError):
+                continue
+        logger.error(f"[Extractor] TXT 인코딩 감지 실패: {file_path}")
+        return None
 
     # ----------------------------------------
     # 비동기 추출
@@ -234,6 +251,9 @@ class FileTextExtractor:
         """MarkItDown으로 텍스트 추출"""
         if on_progress:
             await on_progress(5, "문서 내용 추출 중...")
+        _, ext = os.path.splitext(file_path)
+        if ext.lower() == ".txt":
+            return await asyncio.to_thread(self._read_text_file, file_path)
         if self._markitdown is None:
             logger.error("[Extractor] MarkItDown 미설치")
             return None
@@ -249,8 +269,57 @@ class FileTextExtractor:
             logger.error(f"[Extractor] MarkItDown 오류: {e}")
             return None
 
+    @staticmethod
+    def extract_hwpx_direct(file_path: str) -> Optional[str]:
+        """HWPX(ZIP+XML)에서 win32com 없이 텍스트 직접 추출."""
+        import re
+        import zipfile
+        from xml.etree import ElementTree as ET
+        try:
+            with zipfile.ZipFile(file_path, "r") as zf:
+                names = zf.namelist()
+                if "Preview/PrvText.txt" in names:
+                    raw = zf.read("Preview/PrvText.txt")
+                    for enc in ("utf-8", "utf-16", "utf-16-le", "cp949"):
+                        try:
+                            text = raw.decode(enc).strip()
+                        except UnicodeDecodeError:
+                            continue
+                        if text:
+                            return text
+                texts: List[str] = []
+                section_names = sorted(
+                    n for n in names
+                    if n.startswith("Contents/section") and n.endswith(".xml")
+                )
+                for name in section_names:
+                    try:
+                        root = ET.fromstring(zf.read(name))
+                    except (KeyError, ET.ParseError):
+                        continue
+                    for elem in root.iter():
+                        tag = elem.tag.split("}", 1)[-1]
+                        if tag in ("t", "char") and elem.text:
+                            texts.append(elem.text)
+                    texts.append("\n")
+            joined = "".join(texts)
+            joined = re.sub(r"[ \t]+", " ", joined)
+            joined = re.sub(r"\n{3,}", "\n\n", joined).strip()
+            return joined or None
+        except Exception as e:
+            logger.error(f"[Extractor] HWPX 직접 파싱 실패: {e}")
+            return None
+
     async def extract_with_win32hwp(self, file_path: str, on_progress=None) -> Optional[List[Tuple[int, str]]]:
-        """HWP → PDF (win32com) → 텍스트 추출"""
+        """HWP → PDF (win32com) → 텍스트 추출. .hwpx는 win32com 없이 직접 파싱 우선."""
+        if file_path.lower().endswith(".hwpx"):
+            if on_progress:
+                await on_progress(5, "HWPX 직접 파싱 중...")
+            direct_text = await asyncio.to_thread(self.extract_hwpx_direct, file_path)
+            if direct_text:
+                return [(1, direct_text)]
+            logger.warning("[Extractor] HWPX 직접 파싱 결과 비어있음 → win32com 폴백")
+
         if on_progress:
             await on_progress(5, "HWP 문서 변환 중...")
         temp_dir = tempfile.mkdtemp()

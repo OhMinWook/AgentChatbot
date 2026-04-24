@@ -16,6 +16,7 @@ class SSEType(str, Enum):
     RESULT = "result"
     RAG_DOCUMENTS = "rag_documents"  # 디버깅용 RAG 검색 결과
     MARKDOWN_PREVIEW = "markdown_preview"  # 디버깅용 마크다운 변환 결과
+    TRANSLATION = "translation"  # 번역 결과
 
 
 def create_sse_data(data: dict) -> str:

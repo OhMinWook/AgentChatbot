@@ -13,12 +13,15 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
+# from app.core.langfuse_client import langfuse  # noqa: F401 - Langfuse 비활성화
 from app.api.routes_health import router as health_router
 from app.api.routes_chatbot import router as chatbot_router
 from app.api.routes_callsummary import router as callsummary_router
 from app.api.routes_dialogue_converter import router as dialogue_converter_router
 from app.api.routes_document_automation import router as document_automation_router
 from app.api.routes_admin import router as admin_router
+from app.api.routes_db_chat import router as db_chat_router
+from app.api.routes_unified import router as unified_router
 
 # 클라이언트 인스턴스들 (종료 시 정리용)
 from app.services.api_clients.llm_client import llm_client
@@ -84,3 +87,5 @@ app.include_router(callsummary_router)
 app.include_router(dialogue_converter_router)
 app.include_router(document_automation_router)
 app.include_router(admin_router)
+app.include_router(db_chat_router)
+app.include_router(unified_router)

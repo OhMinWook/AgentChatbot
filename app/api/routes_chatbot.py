@@ -12,7 +12,8 @@ from app.services.utils.file_utils import save_upload_file
 from app.services.utils.sse_utils import create_sse_data, create_sse_response, SSEType
 from app.services.rag.rag_ingestion_service import rag_ingestion_service
 from app.services.chat_agent.sse_adapter import sse_graph_adapter
-from app.services.chat_agent.nodes import stream_llm_tokens
+from app.services.chat_agent.guardrails_impl import chat_guardrails
+from app.services.chat_agent.node_utils import stream_llm_tokens
 from app.services.chat_agent.tools import create_search_tool
 from app.services.chat_agent.document_summary_service import document_summary_service
 from app.services.rag.qdrant_service import qdrant_service
@@ -119,7 +120,12 @@ async def upload_document(
 
             # 큐 소비 및 스트리밍
             while True:
-                data = await queue.get()
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=settings.SSE_QUEUE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    yield create_sse_data({"type": SSEType.ERROR, "detail": "처리 시간이 초과되었습니다."})
+                    task.cancel()
+                    return
                 if data is None:
                     break
                 yield data
@@ -138,21 +144,26 @@ async def upload_document(
 async def send_private_message(
         invokeId: str,
         message: str = Form(..., description="유저 대화 내역"),
-        target_filename: str = Form(..., description="검색할 대상 파일명 (확장자 포함)")
+        target_filename: str = Form(..., description="검색할 대상 파일명 (확장자 포함)"),
+        translate_to: Optional[str] = Form(None, description="번역 언어 코드 (en/zh/ja)")
 ):
     """
     특정 파일 내에서만 정보를 검색하여 답변합니다 (Pinpoint Search).
 
     - **target_filename**: 반드시 정확한 파일명을 입력해야 합니다. (예: `manual.pdf`)
     - 해당 파일이 없거나 내용이 없으면 답변하지 못할 수 있습니다.
+    - **translate_to**: 번역 언어 코드 (en=영어, zh=중국어, ja=일본어). 생략 시 번역 안 함.
     """
     try:
-        # SSE 생성기 생성
-        generator = sse_graph_adapter.invoke_with_sse(invokeId, message, filter_filename=target_filename)
+        guard = await chat_guardrails.check_input(message)
+        if not guard.allowed:
+            raise HTTPException(status_code=400, detail=guard.reason)
 
-        # 공통 헬퍼로 스트리밍 반환
-        return create_sse_response(_stream_chat_response(generator, invokeId, message, "Private"))
+        generator = sse_graph_adapter.invoke_with_sse(invokeId, guard.text, filter_filename=target_filename, translate_to=translate_to)
+        return create_sse_response(_stream_chat_response(generator, invokeId, guard.text, "Private"))
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[Private Message Error] {e}")
         raise HTTPException(status_code=500, detail="요청 처리 중 오류가 발생했습니다.")
@@ -161,51 +172,28 @@ async def send_private_message(
 @router.post("/message/open/{invokeId}", summary="전체 문서 대화 (Global Search)")
 async def send_open_message(
         invokeId: str,
-        message: str = Form(..., description="유저 대화 내역")
+        message: str = Form(..., description="유저 대화 내역"),
+        translate_to: Optional[str] = Form(None, description="번역 언어 코드 (en/zh/ja)")
 ):
     """
     업로드된 모든 문서를 대상으로 정보를 검색하여 답변합니다 (Open/Global Search).
+
+    - **translate_to**: 번역 언어 코드 (en=영어, zh=중국어, ja=일본어). 생략 시 번역 안 함.
     """
     try:
-        # SSE 생성기 생성
-        generator = sse_graph_adapter.invoke_with_sse(invokeId, message, filter_filename=None)
+        guard = await chat_guardrails.check_input(message)
+        if not guard.allowed:
+            raise HTTPException(status_code=400, detail=guard.reason)
 
-        # 공통 헬퍼로 스트리밍 반환
-        return create_sse_response(_stream_chat_response(generator, invokeId, message, "Open"))
+        generator = sse_graph_adapter.invoke_with_sse(invokeId, guard.text, filter_filename=None, translate_to=translate_to)
+        return create_sse_response(_stream_chat_response(generator, invokeId, guard.text, "Open"))
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[Open Message Error] {e}")
         raise HTTPException(status_code=500, detail="요청 처리 중 오류가 발생했습니다.")
 
-
-@router.post("/message/{invokeId}/continue", summary="Human-in-the-loop 계속")
-async def continue_conversation(
-        invokeId: str,
-        thread_id: Optional[str] = Form(None, description="이전 대화 스레드 ID"),
-        response: Optional[str] = Form(None, description="사용자 명확화 응답")
-):
-    """
-    Human-in-the-loop 후 그래프 재개
-
-    clarification_needed 이벤트에서 받은 thread_id와
-    사용자의 명확화 응답을 사용하여 대화를 계속합니다.
-    """
-    logger.info(f"[Continue Request] invokeId: {invokeId}, thread_id: {thread_id}, response: {response}")
-
-    if not thread_id or not response:
-        logger.warning(f"[Continue Validation Failed] Missing thread_id or response")
-        raise HTTPException(status_code=422, detail="thread_id와 response는 필수입니다.")
-
-    try:
-        # SSE 생성기 생성
-        generator = sse_graph_adapter.continue_with_sse(invokeId, thread_id, response)
-
-        # 공통 헬퍼로 스트리밍 반환
-        return create_sse_response(_stream_chat_response(generator, invokeId, response, "Continue"))
-
-    except Exception as e:
-        logger.error(f"[Continue Error] {e}")
-        raise HTTPException(status_code=500, detail="요청 처리 중 오류가 발생했습니다.")
 
 
 @router.get("/files/{invokeId}", summary="업로드된 파일 목록 조회")
@@ -312,7 +300,12 @@ async def summarize_document(
         task = asyncio.create_task(run())
 
         while True:
-            item = await queue.get()
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=settings.SSE_QUEUE_TIMEOUT)
+            except asyncio.TimeoutError:
+                yield create_sse_data({"type": SSEType.ERROR, "detail": "처리 시간이 초과되었습니다."})
+                task.cancel()
+                return
             if item is None:
                 break
             yield item

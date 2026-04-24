@@ -1,16 +1,43 @@
 """통화 요약 API - SSE 기반 실시간 진행률 제공"""
 import asyncio
+import logging
 import time
 from enum import Enum
 from typing import AsyncGenerator
 
 from fastapi import APIRouter, File, UploadFile, HTTPException
 
+from app.core.config import settings
 from app.services.api_clients.stt_client import stt_client
 from app.services.api_clients.llm_client import llm_client
 from app.services.prompt_builders.callsummary_prompt_builder import callsummary_prompt_builder
 from app.services.utils.sse_utils import create_sse_data, create_sse_response, SSEType
 from app.services.utils.file_utils import save_upload_file
+
+logger = logging.getLogger(__name__)
+
+
+async def preprocess_audio_ffmpeg(audio_bytes: bytes, ext: str) -> bytes:
+    """ffmpeg로 오디오 전처리: 통화 대역 필터(300~3400Hz) + 16kHz 업샘플링 + 모노 변환"""
+    cmd = [
+        settings.FFMPEG_PATH, "-f", ext, "-i", "pipe:0",
+        "-ar", "16000",
+        "-ac", "1",
+        "-f", "wav", "pipe:1",
+        "-loglevel", "quiet"
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate(input=audio_bytes)
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg 전처리 실패 (code={proc.returncode}): {stderr.decode(errors='replace')}")
+
+    return stdout
 
 
 class SummaryStage(str, Enum):
@@ -75,9 +102,19 @@ async def summarize_call(
 
                 # ========== 2. STT 처리 (10% → 50%) ==========
                 await on_progress(15, SummaryStage.STT_START, "음성을 분석하고 있습니다")
+
+                filename = audio.filename or "audio.wav"
+                ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "wav"
+                audio_bytes = await asyncio.to_thread(lambda: open(saved_path, "rb").read())
+
+                try:
+                    audio_bytes = await preprocess_audio_ffmpeg(audio_bytes, ext)
+                except Exception as e:
+                    logger.warning(f"ffmpeg 전처리 실패, 원본 사용: {e}")
+
                 await on_progress(25, SummaryStage.STT_PROCESSING, "음성을 텍스트로 변환 중...")
 
-                transcript = await stt_client.transcribe(saved_path)
+                transcript = await stt_client.transcribe_bytes(audio_bytes, filename)
                 if not transcript:
                     raise ValueError("STT 결과가 비어있습니다. 오디오 파일을 확인해주세요.")
 
@@ -140,7 +177,16 @@ async def summarize_call_sync(
             default_filename="audio.wav"
         )
 
-        transcript = await stt_client.transcribe(saved_path)
+        filename = audio.filename or "audio.wav"
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "wav"
+        audio_bytes = await asyncio.to_thread(lambda: open(saved_path, "rb").read())
+
+        try:
+            audio_bytes = await preprocess_audio_ffmpeg(audio_bytes, ext)
+        except Exception as e:
+            logger.warning(f"ffmpeg 전처리 실패, 원본 사용: {e}")
+
+        transcript = await stt_client.transcribe_bytes(audio_bytes, filename)
         if not transcript:
             raise HTTPException(status_code=400, detail="STT 결과가 비어있습니다.")
 

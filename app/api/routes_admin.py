@@ -9,6 +9,8 @@ from typing import Optional
 
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException
 
+from app.services.utils.profanity_filter import reload as reload_profanity
+
 from app.api.schemas.admin_schemas import (
     AdminBaseResponse,
     DocumentItem,
@@ -280,3 +282,16 @@ async def get_document_count():
             code="5000",
             message=f"서버 오류: {str(e)}",
         )
+
+
+@router.post("/profanity/reload", summary="금칙어 목록 재로드")
+async def reload_profanity_filter():
+    """
+    dataset.csv의 금칙어 목록을 서버 재시작 없이 즉시 갱신합니다.
+    """
+    try:
+        reload_profanity()
+        return {"code": "0000", "message": "금칙어 목록이 갱신되었습니다."}
+    except Exception as e:
+        logger.exception(f"[Admin] Profanity reload failed: {e}")
+        raise HTTPException(status_code=500, detail=f"서버 오류: {str(e)}")

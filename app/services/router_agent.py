@@ -13,7 +13,7 @@ from typing import AsyncGenerator, Optional
 from app.services.api_clients.llm_utils import call_llm, strip_markdown_codeblock, strip_think_blocks
 from app.services.api_clients.llm_client import llm_client
 from app.services.utils.llm_payload import build_chat_payload
-from app.services.db_agent.prompts import SQL_GENERATOR
+from app.services.db_agent.prompts import SQL_GENERATOR, INTENT_CLASSIFIER
 from app.services.db_agent.tools import db_tool
 from app.services.db_agent.sse_adapter import db_sse_adapter
 from app.services.chat_agent.sse_adapter import sse_graph_adapter
@@ -55,7 +55,22 @@ class RouterAgent:
     ) -> AsyncGenerator[bytes, None]:
         """DB 조회 후 결과에 따라 db_agent 또는 chat_agent(벡터 DB)로 라우팅"""
 
-        # 1. LLM으로 SQL 생성
+        # 1. 의도 분류 — DB 조회 vs 문서 검색
+        intent = await self._classify_intent(user_query)
+        if intent == "rag":
+            logger.info(f"[Router] 의도 분류 → RAG (문서 검색): {user_query[:50]}")
+            async for chunk in sse_graph_adapter.invoke_with_sse(
+                invoke_id=invoke_id,
+                user_query=user_query,
+                filter_filename=None,
+                translate_to=translate_to,
+            ):
+                yield chunk
+            return
+
+        logger.info(f"[Router] 의도 분류 → DB 조회: {user_query[:50]}")
+
+        # 2. LLM으로 SQL 생성
         sql = await self._generate_sql(user_query)
 
         if sql:
@@ -85,6 +100,22 @@ class RouterAgent:
             translate_to=translate_to,
         ):
             yield chunk
+
+    async def _classify_intent(self, question: str) -> str:
+        """질문이 DB 조회인지 문서 검색인지 판별. 'db' 또는 'rag' 반환"""
+        payload = build_chat_payload(
+            messages=[
+                {"role": "system", "content": INTENT_CLASSIFIER.system},
+                {"role": "user", "content": INTENT_CLASSIFIER.user.format(question=question)},
+            ],
+            max_tokens=16,
+        )
+        response = await llm_client.chat_completions(payload)
+        raw = llm_client.extract_content(response)
+        result = strip_think_blocks(raw).strip().lower()
+        intent = "db" if "db" in result else "rag"
+        logger.info(f"[Router] 의도 분류 결과: '{result}' → {intent}")
+        return intent
 
     async def _generate_sql(self, question: str) -> str:
         """LLM으로 SQL 생성"""

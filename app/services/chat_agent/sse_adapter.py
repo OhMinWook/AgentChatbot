@@ -66,16 +66,9 @@ class SSEGraphAdapter:
     ) -> AsyncGenerator[bytes, None]:
         """streaming_payload를 기반으로 answer 이벤트를 청크 단위로 전송.
         translate_to가 있으면 [TRANSLATION] 구분자 기준으로 ANSWER/TRANSLATION 이벤트 분리."""
-        first_token_logged = False
         translate_to = streaming_payload.get("translate_to")
         DELIMITER = "[TRANSLATION]"
         D_LEN = len(DELIMITER)
-
-        def log_ttft():
-            nonlocal first_token_logged
-            if not first_token_logged and t_start:
-                logger.info(f"[Timing] TTFT: {time.perf_counter() - t_start:.2f}s")
-                first_token_logged = True
 
         if streaming_payload.get("precomputed"):
             content = self._normalize_markdown(streaming_payload.get("content", ""))
@@ -84,13 +77,11 @@ class SSEGraphAdapter:
                 korean = korean.strip()
                 translation = translation.strip()
                 for i in range(0, len(korean), _CHUNK_SIZE):
-                    log_ttft()
                     yield self._format_sse({"type": SSEType.ANSWER, "content": korean[i:i + _CHUNK_SIZE]})
                 for i in range(0, len(translation), _CHUNK_SIZE):
                     yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": translation[i:i + _CHUNK_SIZE]})
             else:
                 for i in range(0, len(content), _CHUNK_SIZE):
-                    log_ttft()
                     yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
         else:
             messages = streaming_payload.get("messages", [])
@@ -110,7 +101,6 @@ class SSEGraphAdapter:
                             before = accumulated[:idx].rstrip("\n")
                             after = accumulated[idx + D_LEN:].lstrip("\n")
                             if before:
-                                log_ttft()
                                 yield self._format_sse({"type": SSEType.ANSWER, "content": before})
                             in_translation = True
                             accumulated = after
@@ -120,7 +110,6 @@ class SSEGraphAdapter:
                         else:
                             safe_len = max(0, len(accumulated) - D_LEN)
                             if safe_len > 0:
-                                log_ttft()
                                 yield self._format_sse({"type": SSEType.ANSWER, "content": accumulated[:safe_len]})
                                 accumulated = accumulated[safe_len:]
                     else:
@@ -132,7 +121,6 @@ class SSEGraphAdapter:
                 if in_translation and translate_to:
                     yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
                 else:
-                    log_ttft()
                     yield self._format_sse({"type": SSEType.ANSWER, "content": accumulated})
 
     # ------------------------------------------------------------------
@@ -348,11 +336,16 @@ class SSEGraphAdapter:
             if final_state:
                 answer_buffer = []
                 translation_buffer = []
+                t_first_token = None
 
                 async def _collecting_emit():
+                    nonlocal t_first_token
                     async for chunk in self._emit_final_answer(final_state, t_start=t_start):
                         data = json.loads(chunk.decode("utf-8").removeprefix("data: ").strip())
                         if data.get("type") == SSEType.ANSWER:
+                            if t_first_token is None:
+                                t_first_token = time.perf_counter()
+                                logger.info(f"[Timing] TTFT: {t_first_token - t_start:.2f}s")
                             answer_buffer.append(data.get("content", ""))
                         elif data.get("type") == SSEType.TRANSLATION:
                             translation_buffer.append(data.get("content", ""))
@@ -384,6 +377,7 @@ class SSEGraphAdapter:
                 if full_translation and is_open and refs:
                     await answer_cache_service.add_translation(invoke_id, user_query, translate_to, full_translation)
 
+            logger.info(f"[Timing] Total: {time.perf_counter() - t_start:.2f}s")
             yield self._format_sse({"type": SSEType.DONE})
 
         except Exception as e:

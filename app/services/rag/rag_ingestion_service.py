@@ -52,6 +52,40 @@ class RagIngestionService:
                 preview += f"\n\n... ({len(page_results) - 10}페이지 생략)"
             await on_markdown(preview)
 
+    async def _detect_document_type(self, text: str) -> str:
+        """LLM으로 문서 유형을 감지한다.
+
+        Returns:
+            "structured"   — 헤더/목차/표 등 명확한 구조가 있는 문서 (매뉴얼, 규정집 등)
+            "unstructured" — 연속된 문장 위주의 문서 (계약서 본문, 에세이 등)
+        """
+        sample = text[:1000]
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "문서의 첫 부분을 보고 유형을 판단하세요.\n"
+                    "- structured: 목차, 헤더(#), 번호 체계, 표 등 명확한 구조가 있는 문서\n"
+                    "- unstructured: 연속된 문장 위주로 구성된 문서\n"
+                    "반드시 'structured' 또는 'unstructured' 중 하나만 출력하세요. 다른 설명은 하지 마세요."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"<document>\n{sample}\n</document>",
+            },
+        ]
+        payload = build_chat_payload(messages, max_tokens=10, temperature=0.0)
+        try:
+            response = await llm_client.chat_completions(payload)
+            result = llm_client.extract_content(response).strip().lower()
+            doc_type = "unstructured" if "unstructured" in result else "structured"
+            logger.info(f"[Ingestion] 문서 유형 감지: {doc_type} (응답: {result!r})")
+            return doc_type
+        except Exception as e:
+            logger.warning(f"[Ingestion] 문서 유형 감지 실패, structured 기본값 사용: {e}")
+            return "structured"
+
     async def _generate_chunk_context(self, doc_text: str, chunk_content: str) -> str:
         """LLM으로 청크의 문서 내 맥락을 1~2문장으로 생성"""
         messages = [
@@ -167,8 +201,12 @@ class RagIngestionService:
         if on_progress:
             await on_progress(20, "문서 파싱 완료")
 
-        # 5. 청킹 + prev/next 연결
-        all_chunks, max_page = build_chunks(file_name, page_results, markdown_content)
+        # 5. 문서 유형 감지 (LLM)
+        raw_text = markdown_content or "\n".join(t for _, t in (page_results or []))
+        doc_type = await self._detect_document_type(raw_text)
+
+        # 6. 청킹 + prev/next 연결
+        all_chunks, max_page = await build_chunks(file_name, page_results, markdown_content, doc_type)
         if on_progress:
             await on_progress(30, f"{len(all_chunks)}개 청크 생성 완료")
 
@@ -176,12 +214,11 @@ class RagIngestionService:
             logger.warning(f"[Ingestion] 청크 생성 실패: {file_name}")
             return
 
-        # 6. Contextual Retrieval (설정 시 활성화)
+        # 7. Contextual Retrieval (설정 시 활성화)
         if settings.CONTEXTUAL_RETRIEVAL_ENABLED:
-            doc_text = markdown_content or "\n".join(t for _, t in (page_results or []))
-            all_chunks = await self._add_context_to_chunks(doc_text, all_chunks, on_progress)
+            all_chunks = await self._add_context_to_chunks(raw_text, all_chunks, on_progress)
 
-        # 7. 임베딩 + 인덱싱
+        # 8. 임베딩 + 인덱싱
         await self._process_batch(all_chunks, invoke_id, on_progress)
 
         logger.info(f"[Ingestion] 완료: {file_name} ({max_page}페이지, {len(all_chunks)}청크)")

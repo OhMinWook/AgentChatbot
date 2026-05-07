@@ -138,7 +138,10 @@ async def generate_single_answer(agent_prompt, idx: int, question: str, doc_res:
         }
 
     high_risk = is_high_risk_question(question)
-    langfuse_context.update_current_observation(metadata={"high_risk": high_risk})
+    try:
+        langfuse_context.update_current_observation(metadata={"high_risk": high_risk})
+    except Exception:
+        pass
     if high_risk:
         logger.info(f"[Process] 고위험 질문 - pre-generate: {question[:50]}")
         answer = await call_llm(messages, max_tokens=max_tokens)

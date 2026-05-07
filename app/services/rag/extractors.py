@@ -48,20 +48,302 @@ def get_pdf_process_pool() -> ProcessPoolExecutor:
 # 멀티프로세싱용 모듈 레벨 함수 (ProcessPoolExecutor pickle 필요)
 # ----------------------------------------
 
+def _estimate_body_font_size(doc, sample_pages: int = 10) -> float:
+    """전체 문서에서 본문 폰트 크기 추정 (가장 많이 등장하는 크기)"""
+    from collections import Counter
+    sizes = []
+    for i in range(min(sample_pages, len(doc))):
+        page = doc[i]
+        raw = page.get_text("dict")
+        for block in raw.get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    text = span.get("text", "").strip()
+                    size = round(span.get("size", 0), 1)
+                    if text and size > 0:
+                        sizes.append(size)
+    if not sizes:
+        return 10.0
+    return Counter(sizes).most_common(1)[0][0]
+
+
+def _is_in_table(bbox, table_bboxes) -> bool:
+    """블록이 표 영역 내에 있는지 확인"""
+    bx0, by0, bx1, by1 = bbox
+    for tx0, ty0, tx1, ty1 in table_bboxes:
+        if bx0 >= tx0 - 2 and by0 >= ty0 - 2 and bx1 <= tx1 + 2 and by1 <= ty1 + 2:
+            return True
+    return False
+
+
+def _table_to_markdown(table) -> str:
+    """PyMuPDF 표를 마크다운 형식으로 변환"""
+    try:
+        data = table.extract()
+        if not data:
+            return ""
+        rows = []
+        for i, row in enumerate(data):
+            cells = [str(cell or "").replace("\n", " ").strip() for cell in row]
+            rows.append("| " + " | ".join(cells) + " |")
+            if i == 0:
+                rows.append("| " + " | ".join(["---"] * len(cells)) + " |")
+        return "\n".join(rows)
+    except Exception:
+        return ""
+
+
+def _table_to_text(table) -> str:
+    """PyMuPDF 표 셀 내용을 plain text로 추출 (테두리 없는 표용)"""
+    try:
+        data = table.extract()
+        if not data:
+            return ""
+        cells = []
+        for row in data:
+            for cell in row:
+                text = str(cell or "").replace("\n", " ").strip()
+                if text:
+                    cells.append(text)
+        return " ".join(cells)
+    except Exception:
+        return ""
+
+
+def _bbox_overlaps(a, b) -> bool:
+    """두 bbox가 겹치는지 확인"""
+    return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+
+def _detect_borderless_tables(page, existing_bboxes: list, page_height: float) -> list:
+    """y clustering + x histogram으로 테두리 없는 표 감지
+
+    Returns: [(y_top, bbox_tuple, plain_text), ...]
+    """
+    Y_TOL = 4    # 같은 행으로 볼 y좌표 허용 오차 (px)
+    X_TOL = 6    # 같은 열로 볼 x좌표 허용 오차 (px)
+    MIN_COLS = 2  # 최소 열 수
+    MIN_ROWS = 2  # 최소 행 수
+    ROW_GAP = 20  # 같은 표로 묶을 최대 행 간격 (px)
+
+    # 1. span 수집 (헤더/푸터·기존 표 영역 제외)
+    spans = []
+    for block in page.get_text("rawdict").get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        bx = block.get("bbox", [0, 0, 0, 0])
+        if bx[1] < page_height * 0.05 or bx[3] > page_height * 0.95:
+            continue
+        if _is_in_table(bx, existing_bboxes):
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                text = span.get("text", "").strip()
+                if not text:
+                    continue
+                sb = span.get("bbox", [0, 0, 0, 0])
+                spans.append((sb[0], sb[1], sb[2], sb[3], text))
+
+    if not spans:
+        return []
+
+    # 2. y clustering → rows
+    rows = []
+    for span in sorted(spans, key=lambda s: s[1]):
+        placed = False
+        for row in rows:
+            row_y = sum(s[1] for s in row) / len(row)
+            if abs(span[1] - row_y) <= Y_TOL:
+                row.append(span)
+                placed = True
+                break
+        if not placed:
+            rows.append([span])
+
+    # 3. x histogram → column positions
+    all_x0 = [s[0] for row in rows for s in row]
+    x_clusters = []
+    for x in sorted(all_x0):
+        placed = False
+        for cluster in x_clusters:
+            if abs(x - sum(cluster) / len(cluster)) <= X_TOL:
+                cluster.append(x)
+                placed = True
+                break
+        if not placed:
+            x_clusters.append([x])
+
+    col_positions = [sum(c) / len(c) for c in x_clusters if len(c) >= MIN_ROWS]
+    if len(col_positions) < MIN_COLS:
+        return []
+
+    # 4. 표 구조 검증: 각 행이 2개 이상의 column에 align되는지 확인
+    table_rows = []
+    for row in rows:
+        aligned = {col_x for span in row for col_x in col_positions if abs(span[0] - col_x) <= X_TOL}
+        if len(aligned) >= MIN_COLS:
+            table_rows.append(row)
+
+    if len(table_rows) < MIN_ROWS:
+        return []
+
+    # 5. 연속된 행을 그룹으로 묶기
+    groups = []
+    current = [table_rows[0]]
+    for row in table_rows[1:]:
+        prev_y1 = max(s[3] for s in current[-1])
+        curr_y0 = min(s[1] for s in row)
+        if curr_y0 - prev_y1 <= ROW_GAP:
+            current.append(row)
+        else:
+            groups.append(current)
+            current = [row]
+    groups.append(current)
+
+    # 6. 그룹별 plain text + bbox 생성
+    results = []
+    for group in groups:
+        all_spans = [s for row in group for s in row]
+        x0 = min(s[0] for s in all_spans)
+        y0 = min(s[1] for s in all_spans)
+        x1 = max(s[2] for s in all_spans)
+        y1 = max(s[3] for s in all_spans)
+        bbox = (x0, y0, x1, y1)
+
+        text_parts = []
+        for row in group:
+            row_text = " ".join(s[4] for s in sorted(row, key=lambda s: s[0]))
+            text_parts.append(row_text)
+        plain_text = " ".join(text_parts).strip()
+
+        if plain_text:
+            results.append((y0, bbox, plain_text))
+
+    return results
+
+
+def _classify_block(dominant_size: float, body_size: float, is_bold: bool) -> str:
+    """폰트 크기 비율로 블록 타입 분류"""
+    ratio = dominant_size / body_size if body_size > 0 else 1.0
+    if ratio >= 1.8:
+        return "heading1"
+    elif ratio >= 1.4:
+        return "heading2"
+    elif ratio >= 1.1 or (abs(ratio - 1.0) < 0.05 and is_bold):
+        return "heading3"
+    return "body"
+
+
+def _extract_structured_page(page, body_size: float) -> str:
+    """PyMuPDF 페이지에서 구조화된 텍스트 추출"""
+    from collections import Counter
+
+    page_height = page.rect.height
+
+    # 1. 표 감지
+    table_bboxes = []
+    table_items = []
+    try:
+        for table in page.find_tables():
+            bbox = tuple(table.bbox)
+            md = _table_to_markdown(table)
+            if md:
+                table_bboxes.append(bbox)
+                table_items.append((bbox[1], "table", md))
+    except Exception:
+        pass
+
+    # 2. 텍스트 블록 추출 및 분류
+    raw = page.get_text("dict")
+    text_items = []
+
+    for block in raw.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+
+        bbox = block.get("bbox", [0, 0, 0, 0])
+        y_top, y_bottom = bbox[1], bbox[3]
+
+        # 헤더/푸터 제거 (상위 5%, 하위 5%)
+        if y_top < page_height * 0.05 or y_bottom > page_height * 0.95:
+            continue
+
+        # 표 영역 내 블록 제거
+        if _is_in_table(bbox, table_bboxes):
+            continue
+
+        spans = []
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                text = span.get("text", "").strip()
+                size = round(span.get("size", 0), 1)
+                bold = "Bold" in span.get("font", "") or "bold" in span.get("font", "")
+                if text and size > 0:
+                    spans.append({"text": text, "size": size, "bold": bold})
+
+        if not spans:
+            continue
+
+        sizes = [s["size"] for s in spans]
+        dominant_size = Counter(sizes).most_common(1)[0][0]
+        is_bold = any(s["bold"] for s in spans)
+        full_text = " ".join(s["text"] for s in spans).strip()
+
+        if not full_text:
+            continue
+
+        # 너무 작은 폰트 제거 (페이지 번호 등)
+        if dominant_size < body_size * 0.7:
+            continue
+
+        block_type = _classify_block(dominant_size, body_size, is_bold)
+        text_items.append((y_top, block_type, full_text))
+
+    # 3. y좌표 순으로 정렬 후 마크다운 텍스트 생성
+    all_items = text_items + [(y, t, m) for y, t, m in table_items]
+    all_items.sort(key=lambda x: x[0])
+
+    lines = []
+    for _, block_type, text in all_items:
+        if block_type == "heading1":
+            lines.append(f"\n# {text}")
+        elif block_type == "heading2":
+            lines.append(f"\n## {text}")
+        elif block_type == "heading3":
+            lines.append(f"\n### {text}")
+        elif block_type == "table":
+            lines.append(f"\n{text}\n")
+        else:
+            lines.append(text)
+
+    return "\n".join(lines).strip()
+
+
 def _parse_pdf_in_process(pdf_path: str) -> List[Tuple[int, str]]:
-    """별도 프로세스에서 PDF 파싱 (멀티프로세싱용)
+    """별도 프로세스에서 PDF 파싱 (PyMuPDF 블록 기반)
 
     Returns: [(page_num, content), ...]
     """
     try:
-        import pdf4llm as _pdf4llm
-        pages_data = _pdf4llm.to_markdown(pdf_path, page_chunks=True)
+        try:
+            import pymupdf as fitz
+        except ImportError:
+            import fitz
+
+        doc = fitz.open(pdf_path)
+        body_size = _estimate_body_font_size(doc)
+
         results = []
-        for page_idx, page_data in enumerate(pages_data):
+        for page_idx in range(len(doc)):
+            page = doc[page_idx]
             page_num = page_idx + 1
-            content_text = page_data if isinstance(page_data, str) else page_data.get('text', '')
-            if content_text.strip():
-                results.append((page_num, content_text.strip()))
+            page_text = _extract_structured_page(page, body_size)
+            if page_text.strip():
+                results.append((page_num, page_text))
+
+        doc.close()
         return results
     except Exception:
         return []
@@ -94,19 +376,24 @@ class FileTextExtractor:
     # ----------------------------------------
 
     def iter_pdf_pages(self, pdf_path: str) -> Generator[Tuple[int, str], None, None]:
-        """PDF를 페이지 단위로 yield하는 제너레이터"""
-        if pdf4llm is None:
-            logger.error("[Extractor] pdf4llm 라이브러리가 설치되지 않았습니다.")
-            return
+        """PDF를 페이지 단위로 yield하는 제너레이터 (PyMuPDF 블록 기반)"""
         try:
-            pages_data = pdf4llm.to_markdown(pdf_path, page_chunks=True)
-            for page_idx, page_data in enumerate(pages_data):
+            try:
+                import pymupdf as fitz
+            except ImportError:
+                import fitz
+
+            doc = fitz.open(pdf_path)
+            body_size = _estimate_body_font_size(doc)
+            for page_idx in range(len(doc)):
+                page = doc[page_idx]
                 page_num = page_idx + 1
-                content_text = page_data if isinstance(page_data, str) else page_data.get('text', '')
-                if content_text.strip():
-                    yield page_num, content_text.strip()
+                page_text = _extract_structured_page(page, body_size)
+                if page_text.strip():
+                    yield page_num, page_text.strip()
+            doc.close()
         except Exception as e:
-            logger.exception(f"[Extractor] pdf4llm 변환 중 예외 발생: {e}")
+            logger.exception(f"[Extractor] PyMuPDF 변환 중 예외 발생: {e}")
 
     def _try_hwp_save(self, hwp, output_pdf_path: str) -> bool:
         """HWP → PDF 저장을 3가지 방법으로 순차 시도. 성공 시 True 반환."""
@@ -151,6 +438,11 @@ class FileTextExtractor:
             try:
                 hwp = win32com.client.gencache.EnsureDispatch("HWPFrame.HwpObject")
             except Exception:
+                # gen_py 캐시 손상 시 자동 삭제 후 재시도
+                gen_py_path = os.path.join(tempfile.gettempdir(), "gen_py")
+                if os.path.exists(gen_py_path):
+                    shutil.rmtree(gen_py_path, ignore_errors=True)
+                    logger.warning("[Extractor] win32com gen_py 캐시 삭제 후 재시도")
                 hwp = win32com.client.Dispatch("HWPFrame.HwpObject")
 
             hwp.RegisterModule("FilePathCheckDLL", "FilePathCheckerModule")

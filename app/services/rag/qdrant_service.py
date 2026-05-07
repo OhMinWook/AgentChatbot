@@ -125,11 +125,14 @@ class QdrantService:
                 }
             ))
 
-        # Qdrant upsert (동일 ID면 덮어쓰기)
-        await self.client.upsert(
-            collection_name=settings.QDRANT_COLLECTION,
-            points=points,
-        )
+        # Qdrant upsert (50개씩 배치 분할 — payload 크기 제한 방지)
+        batch_size = 50
+        for i in range(0, len(points), batch_size):
+            batch = points[i:i + batch_size]
+            await self.client.upsert(
+                collection_name=settings.QDRANT_COLLECTION,
+                points=batch,
+            )
 
         logger.info(f"[Qdrant] Upserted {len(points)} documents (hybrid) for invoke_id={invoke_id}")
         return len(points)

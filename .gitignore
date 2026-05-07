@@ -10,7 +10,8 @@ libs
 *.mp3
 *.m4a
 *.pdf
-CLAUDE.md
+*.md
+eval/
 .env
 test_ui.html
 .claude/skills/

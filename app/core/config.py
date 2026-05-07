@@ -30,7 +30,8 @@ class Settings(BaseModel):
     ANSWER_CACHE_ENABLED: bool = os.getenv("ANSWER_CACHE_ENABLED", "true").lower() == "true"
 
     # [검색 설정]
-    SEARCH_TOP_K: int = 4
+    SEARCH_TOP_K: int = 5
+    SEMANTIC_SIMILARITY_THRESHOLD: float = float(os.getenv("SEMANTIC_SIMILARITY_THRESHOLD", "0.6"))
     DENSE_WEIGHT: float = float(os.getenv("DENSE_WEIGHT", "0.8"))
     RERANK_CANDIDATES: int = int(os.getenv("RERANK_CANDIDATES", "64"))
 

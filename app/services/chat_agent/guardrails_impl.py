@@ -70,7 +70,7 @@ class ProfanityOutputGuard(BaseOutputGuard):
 chat_guardrails = GuardrailsPipeline(
     input_guards=[
         BlankInputGuard(),
-        ProfanityInputGuard(),
+        # ProfanityInputGuard(),
     ],
     output_guards=[
         ProfanityOutputGuard(),

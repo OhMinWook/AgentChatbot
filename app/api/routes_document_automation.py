@@ -17,6 +17,7 @@ from app.services.documents.document_automater_service import document_automater
 from app.services.documents.meeting_minutes_service import meeting_minutes_service
 from app.core.config import settings
 from app.services.rag.extractors import file_text_extractor
+from app.services.rag.rag_ingestion_service import detect_file_type
 from app.services.utils.download_service import download_service
 
 
@@ -66,17 +67,6 @@ def _extract_hwpx_text(file_path: str) -> Optional[str]:
         logger.error(f"[MeetingMinutes] HWPX direct parse failed: {e}")
         return None
 
-
-def _detect_file_type_for_meeting(file_name: str) -> str:
-    _, ext = os.path.splitext(file_name)
-    ext_lower = ext.lower().strip()
-    if settings.POLARIS_ENABLED:
-        return "polaris"
-    if ext_lower in ['.hwp', '.hwpx']:
-        return "hwp_win32"
-    if ext_lower == '.pdf':
-        return "pdf"
-    return "markitdown"
 
 router = APIRouter()
 
@@ -265,7 +255,7 @@ async def generate_meeting_minutes_from_text(
                     if ext_lower == ".hwpx":
                         file_text = _extract_hwpx_text(tmp_path) or ""
                     if not file_text:
-                        file_type = _detect_file_type_for_meeting(uploaded_filename or "")
+                        file_type = detect_file_type(uploaded_filename or "")
                         try:
                             page_results, md_content = await file_text_extractor.extract_text(tmp_path, file_type)
                         except Exception as ex_inner:

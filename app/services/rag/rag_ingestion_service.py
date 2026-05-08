@@ -21,20 +21,23 @@ from app.services.utils.llm_payload import build_chat_payload
 logger = logging.getLogger(__name__)
 
 
+def detect_file_type(file_name: str) -> str:
+    """파일 확장자 기반 처리 타입 결정 (polaris / pdf / markitdown)"""
+    _, ext = os.path.splitext(file_name)
+    ext_lower = ext.lower().strip()
+    if settings.POLARIS_ENABLED:
+        return "polaris"
+    if ext_lower in ['.hwp', '.hwpx']:
+        return "hwp_win32"
+    if ext_lower == '.pdf':
+        return "pdf"
+    return "markitdown"
+
+
 class RagIngestionService:
-    EMBED_BATCH_SIZE = 64
 
     def _detect_file_type(self, file_name: str) -> str:
-        """파일 확장자 기반 처리 타입 결정 (polaris / pdf / markitdown)"""
-        _, ext = os.path.splitext(file_name)
-        ext_lower = ext.lower().strip()
-        if settings.POLARIS_ENABLED:
-            return "polaris"
-        if ext_lower in ['.hwp', '.hwpx']:
-            return "hwp_win32"
-        if ext_lower == '.pdf':
-            return "pdf"
-        return "markitdown"
+        return detect_file_type(file_name)
 
     async def _emit_markdown_preview(
         self,
@@ -148,15 +151,15 @@ class RagIngestionService:
         total_chunks = len(chunks)
         texts = [c["content"] for c in chunks]
 
-        logger.info(f"[Ingestion] 임베딩 요청: {total_chunks}개 (Dense + Sparse, batch={self.EMBED_BATCH_SIZE})")
+        logger.info(f"[Ingestion] 임베딩 요청: {total_chunks}개 (Dense + Sparse, batch={settings.EMBED_BATCH_SIZE})")
         if on_progress:
             await on_progress(40, f"임베딩 중... ({total_chunks}개)")
 
         sparse_vectors = sparse_encoder.encode_batch(texts)
 
         all_embeddings = []
-        for i in range(0, len(texts), self.EMBED_BATCH_SIZE):
-            batch_texts = texts[i:i + self.EMBED_BATCH_SIZE]
+        for i in range(0, len(texts), settings.EMBED_BATCH_SIZE):
+            batch_texts = texts[i:i + settings.EMBED_BATCH_SIZE]
             batch_embeddings = await model_server_client.embed_texts(batch_texts, is_query=False)
             all_embeddings.extend(batch_embeddings)
 

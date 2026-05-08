@@ -48,8 +48,13 @@ class Settings(BaseModel):
     # [모델 스펙]
     EMBEDDING_DIM: int = 1024  # Qwen3-Embedding-0.6B
 
+    # [임베딩 배치 설정]
+    EMBED_BATCH_SIZE: int = int(os.getenv("EMBED_BATCH_SIZE", "64"))
+    QDRANT_UPSERT_BATCH_SIZE: int = int(os.getenv("QDRANT_UPSERT_BATCH_SIZE", "50"))
+
     # [Polaris 설정]
     POLARIS_ENABLED: bool = False
+    POLARIS_JAR_TIMEOUT: int = int(os.getenv("POLARIS_JAR_TIMEOUT", "300"))
 
     # [HyDE - Hypothetical Document Embedding]
     HYDE_ENABLED: bool = os.getenv("HYDE_ENABLED", "true").lower() == "true"

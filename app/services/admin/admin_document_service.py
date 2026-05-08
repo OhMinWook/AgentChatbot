@@ -31,8 +31,6 @@ logger = logging.getLogger(__name__)
 class AdminDocumentService:
     """관리자 문서 관리 전용 서비스"""
 
-    EMBED_BATCH_SIZE = 64
-
     def __init__(self):
         self._client: Optional[AsyncQdrantClient] = None
 
@@ -138,8 +136,8 @@ class AdminDocumentService:
 
         # Dense 임베딩 (배치 순차 호출)
         all_embeddings = []
-        for i in range(0, len(all_texts), self.EMBED_BATCH_SIZE):
-            batch_texts = all_texts[i:i + self.EMBED_BATCH_SIZE]
+        for i in range(0, len(all_texts), settings.EMBED_BATCH_SIZE):
+            batch_texts = all_texts[i:i + settings.EMBED_BATCH_SIZE]
             batch_embeddings = await model_server_client.embed_texts(batch_texts, is_query=False)
             all_embeddings.extend(batch_embeddings)
 

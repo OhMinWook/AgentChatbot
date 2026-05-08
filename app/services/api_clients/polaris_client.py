@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
+from app.core.config import settings
+
 # 로깅 설정
 logger = logging.getLogger(__name__)
 
@@ -110,7 +112,7 @@ class PolarisConverter:
                     cwd=self.jar_dir,
                     capture_output=True,
                     check=False,
-                    timeout=300  # 5분 타임아웃
+                    timeout=settings.POLARIS_JAR_TIMEOUT
                 )
 
                 # stdout 디코딩 (UTF-8 시도 후 실패하면 CP949)

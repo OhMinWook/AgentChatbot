@@ -125,10 +125,9 @@ class QdrantService:
                 }
             ))
 
-        # Qdrant upsert (50개씩 배치 분할 — payload 크기 제한 방지)
-        batch_size = 50
-        for i in range(0, len(points), batch_size):
-            batch = points[i:i + batch_size]
+        # Qdrant upsert (배치 분할 — payload 크기 제한 방지)
+        for i in range(0, len(points), settings.QDRANT_UPSERT_BATCH_SIZE):
+            batch = points[i:i + settings.QDRANT_UPSERT_BATCH_SIZE]
             await self.client.upsert(
                 collection_name=settings.QDRANT_COLLECTION,
                 points=batch,

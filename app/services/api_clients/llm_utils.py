@@ -38,6 +38,46 @@ def strip_markdown_codeblock(text: str) -> str:
     return text
 
 
+class ThinkBlockFilter:
+    """<think>...</think> 블록을 스트리밍 중 실시간 필터링하는 상태 머신.
+
+    feed(token) 호출마다 출력 가능한 텍스트를 반환한다. <think> 구간 내 텍스트는 버린다.
+    """
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self):
+        self._buffer = ""
+        self._in_think = False
+
+    def feed(self, token: str) -> str:
+        """토큰을 받아 외부에 출력할 텍스트를 반환. 빈 문자열이면 출력 없음."""
+        self._buffer += token
+        output = ""
+        while True:
+            if self._in_think:
+                end_idx = self._buffer.find(self._CLOSE)
+                if end_idx != -1:
+                    self._in_think = False
+                    self._buffer = self._buffer[end_idx + len(self._CLOSE):].lstrip("\n")
+                else:
+                    break
+            else:
+                start_idx = self._buffer.find(self._OPEN)
+                if start_idx != -1:
+                    visible = self._buffer[:start_idx]
+                    if visible:
+                        output += visible
+                    self._in_think = True
+                    self._buffer = self._buffer[start_idx + len(self._OPEN):]
+                else:
+                    output += self._buffer
+                    self._buffer = ""
+                    break
+        return output
+
+
 def extract_json_object(text: str) -> Optional[str]:
     """텍스트에서 첫 번째 JSON 객체({...}) 추출"""
     start = text.find("{")
@@ -79,8 +119,7 @@ async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 20
     try:
         stream = await llm_client.chat_completions_stream(payload)
         buffer = ""
-        think_buffer = ""
-        in_think = False
+        think_filter = ThinkBlockFilter()
 
         async for raw_chunk in stream:
             buffer += raw_chunk.decode("utf-8", errors="replace")
@@ -101,30 +140,10 @@ async def stream_llm_tokens(messages: List[Dict[str, str]], max_tokens: int = 20
                     finish_reason = choice.get("finish_reason")
 
                     if token:
-                        think_buffer += token
-                        while True:
-                            if in_think:
-                                end_idx = think_buffer.find("</think>")
-                                if end_idx != -1:
-                                    in_think = False
-                                    think_buffer = think_buffer[end_idx + len("</think>"):].lstrip("\n")
-                                else:
-                                    break
-                            else:
-                                start_idx = think_buffer.find("<think>")
-                                if start_idx != -1:
-                                    visible = think_buffer[:start_idx]
-                                    if visible:
-                                        token_count += 1
-                                        yield visible
-                                    in_think = True
-                                    think_buffer = think_buffer[start_idx + len("<think>"):]
-                                else:
-                                    if think_buffer:
-                                        token_count += 1
-                                        yield think_buffer
-                                    think_buffer = ""
-                                    break
+                        output = think_filter.feed(token)
+                        if output:
+                            token_count += 1
+                            yield output
 
                     if finish_reason:
                         logger.info(f"[LLM Stream] finish_reason={finish_reason}, tokens={token_count}")

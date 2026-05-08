@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 
+def _server_error(ResponseClass, e: Exception, label: str):
+    """예외를 로그에 기록하고 code=5000 응답 반환"""
+    logger.exception(f"[Admin] {label}: {e}")
+    return ResponseClass(code="5000", message=f"서버 오류: {str(e)}")
+
+
 def _build_document_items(docs: list) -> list:
     return [
         DocumentItem(
@@ -95,11 +101,7 @@ async def add_document(
         )
 
     except Exception as e:
-        logger.exception(f"[Admin] Add document failed: {e}")
-        return AdminBaseResponse(
-            code="5000",
-            message=f"서버 오류: {str(e)}",
-        )
+        return _server_error(AdminBaseResponse, e, "Add document failed")
     finally:
         # 임시 파일 삭제
         if temp_file and os.path.exists(temp_file.name):
@@ -128,11 +130,7 @@ async def delete_document(key: str):
         )
 
     except Exception as e:
-        logger.exception(f"[Admin] Delete document failed: {e}")
-        return AdminBaseResponse(
-            code="5000",
-            message=f"서버 오류: {str(e)}",
-        )
+        return _server_error(AdminBaseResponse, e, "Delete document failed")
 
 
 @router.get("/get_documents", response_model=DocumentListResponse)
@@ -168,11 +166,7 @@ async def get_documents(
         )
 
     except Exception as e:
-        logger.exception(f"[Admin] Get documents failed: {e}")
-        return DocumentListResponse(
-            code="5000",
-            message=f"서버 오류: {str(e)}",
-        )
+        return _server_error(DocumentListResponse, e, "Get documents failed")
 
 
 @router.get("/documents/search", response_model=DocumentListResponse)
@@ -216,11 +210,7 @@ async def search_documents(
         )
 
     except Exception as e:
-        logger.exception(f"[Admin] Search documents failed: {e}")
-        return DocumentListResponse(
-            code="5000",
-            message=f"서버 오류: {str(e)}",
-        )
+        return _server_error(DocumentListResponse, e, "Search documents failed")
 
 
 @router.patch("/documents/{key}/toggle", response_model=AdminBaseResponse)
@@ -247,11 +237,7 @@ async def toggle_document_usage(key: str):
         )
 
     except Exception as e:
-        logger.exception(f"[Admin] Toggle usage failed: {e}")
-        return AdminBaseResponse(
-            code="5000",
-            message=f"서버 오류: {str(e)}",
-        )
+        return _server_error(AdminBaseResponse, e, "Toggle usage failed")
 
 
 @router.get("/documents/count", response_model=DocumentCountResponse)
@@ -277,11 +263,7 @@ async def get_document_count():
         )
 
     except Exception as e:
-        logger.exception(f"[Admin] Get count failed: {e}")
-        return DocumentCountResponse(
-            code="5000",
-            message=f"서버 오류: {str(e)}",
-        )
+        return _server_error(DocumentCountResponse, e, "Get count failed")
 
 
 @router.post("/profanity/reload", summary="금칙어 목록 재로드")

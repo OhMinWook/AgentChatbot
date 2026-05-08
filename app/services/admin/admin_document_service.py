@@ -106,61 +106,75 @@ class AdminDocumentService:
         """
         await self.ensure_collection()
 
-        # 중복 key면 기존 삭제 후 덮어쓰기
         exists = await self._check_key_exists(inp.key)
         if exists:
             logger.info(f"[AdminDocument] Duplicate key, overwriting: {inp.key}")
             await self.delete_document(inp.key)
 
-        # 파일 저장 경로: uploaded_files/admin/{hash}/ (경로 길이 제한 방지)
-        key_hash = hashlib.md5(inp.key.encode()).hexdigest()[:16]
-        admin_upload_dir = os.path.join(settings.UPLOAD_DIR, "admin", key_hash)
-        os.makedirs(admin_upload_dir, exist_ok=True)
+        admin_upload_dir, dest_file_path = self._prepare_storage(inp)
 
-        # 파일 복사
-        dest_file_path = os.path.join(admin_upload_dir, inp.file_name)
-        shutil.copy(inp.file_path, dest_file_path)
-
-        # 청킹 수행 (rag_ingestion_service의 청킹 로직 재사용)
         chunks = await self._extract_chunks(dest_file_path, inp.file_name)
-
         if not chunks:
             logger.error(f"[AdminDocument] No chunks extracted: {inp.file_name}")
-            # 실패 시 파일 삭제
             shutil.rmtree(admin_upload_dir, ignore_errors=True)
             return False
 
-        # 임베딩 (dense + sparse, 병렬 처리)
-        all_texts = [
-            add_source_prefix(c["content"], c.get("metadata", {}).get("source", ""))
-            for c in chunks
-        ]
-
-        # Sparse 임베딩 (CPU, 즉시 완료)
-        all_sparse = sparse_encoder.encode_batch(all_texts)
-
-        # Dense 임베딩 (배치 순차 호출)
-        all_embeddings = []
-        for i in range(0, len(all_texts), settings.EMBED_BATCH_SIZE):
-            batch_texts = all_texts[i:i + settings.EMBED_BATCH_SIZE]
-            batch_embeddings = await model_server_client.embed_texts(batch_texts, is_query=False)
-            all_embeddings.extend(batch_embeddings)
-
+        all_embeddings, all_sparse = await self._embed_chunks(chunks)
         if len(all_embeddings) != len(chunks):
             logger.error(f"[AdminDocument] Embedding count mismatch: expected {len(chunks)}, got {len(all_embeddings)}")
             shutil.rmtree(admin_upload_dir, ignore_errors=True)
             return False
 
-        # Qdrant에 저장 (관리자 메타데이터 포함)
+        points = self._build_points(chunks, all_embeddings, all_sparse, inp)
+        await self.client.upsert(collection_name=settings.QDRANT_COLLECTION, points=points)
+        logger.info(f"[AdminDocument] Added {len(points)} chunks for key={inp.key}")
+        return True
+
+    def _prepare_storage(self, inp: AdminDocumentInput) -> Tuple[str, str]:
+        """저장 디렉토리 생성 + 파일 복사.
+
+        Returns:
+            (admin_upload_dir, dest_file_path)
+        """
+        key_hash = hashlib.md5(inp.key.encode()).hexdigest()[:16]
+        admin_upload_dir = os.path.join(settings.UPLOAD_DIR, "admin", key_hash)
+        os.makedirs(admin_upload_dir, exist_ok=True)
+        dest_file_path = os.path.join(admin_upload_dir, inp.file_name)
+        shutil.copy(inp.file_path, dest_file_path)
+        return admin_upload_dir, dest_file_path
+
+    async def _embed_chunks(self, chunks: List[Dict]) -> Tuple[List, List]:
+        """청크 리스트에 대해 dense + sparse 임베딩 생성.
+
+        Returns:
+            (all_embeddings, all_sparse)
+        """
+        all_texts = [
+            add_source_prefix(c["content"], c.get("metadata", {}).get("source", ""))
+            for c in chunks
+        ]
+        all_sparse = sparse_encoder.encode_batch(all_texts)
+        all_embeddings = []
+        for i in range(0, len(all_texts), settings.EMBED_BATCH_SIZE):
+            batch = all_texts[i:i + settings.EMBED_BATCH_SIZE]
+            batch_embeddings = await model_server_client.embed_texts(batch, is_query=False)
+            all_embeddings.extend(batch_embeddings)
+        return all_embeddings, all_sparse
+
+    def _build_points(
+        self,
+        chunks: List[Dict],
+        all_embeddings: List,
+        all_sparse: List,
+        inp: AdminDocumentInput,
+    ) -> List[models.PointStruct]:
+        """청크 + 임베딩으로 Qdrant PointStruct 리스트 생성."""
         regist_date = datetime.now(timezone.utc).isoformat()
         invoke_id = settings.GLOBAL_INVOKE_ID
-
         points = []
         for chunk, emb, sparse in zip(chunks, all_embeddings, all_sparse):
             point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{invoke_id}:{chunk['id']}"))
-
             payload = {
-                # 기존 필드
                 "invoke_id": invoke_id,
                 "doc_id": chunk["id"],
                 "content": chunk["content"],
@@ -168,7 +182,6 @@ class AdminDocumentService:
                 "page": chunk.get("metadata", {}).get("page", 0),
                 "prev_chunk_id": chunk.get("metadata", {}).get("prev_chunk_id"),
                 "next_chunk_id": chunk.get("metadata", {}).get("next_chunk_id"),
-                # 관리자 확장 필드
                 "key": inp.key,
                 "admin_id": inp.admin_id,
                 "admin_name": inp.admin_name,
@@ -176,26 +189,15 @@ class AdminDocumentService:
                 "regist_date": regist_date,
                 "is_use": True,
             }
-
             points.append(models.PointStruct(
                 id=point_id,
                 vector={
                     "dense": emb,
-                    "sparse": models.SparseVector(
-                        indices=sparse["indices"],
-                        values=sparse["values"],
-                    ),
+                    "sparse": models.SparseVector(indices=sparse["indices"], values=sparse["values"]),
                 },
                 payload=payload,
             ))
-
-        await self.client.upsert(
-            collection_name=settings.QDRANT_COLLECTION,
-            points=points,
-        )
-
-        logger.info(f"[AdminDocument] Added {len(points)} chunks for key={key}")
-        return True
+        return points
 
     async def _iter_pages(self, file_path: str, ext_lower: str) -> List[Tuple[int, str]]:
         """파일 타입별 텍스트 추출 → (page_num, text) 리스트 반환"""

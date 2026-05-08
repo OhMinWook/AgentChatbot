@@ -23,7 +23,7 @@ from app.services.utils.sse_utils import SSEType
 
 logger = logging.getLogger(__name__)
 
-# precomputed 답변을 작은 청크로 나눌 때 사용할 크기 (settings.SSEsettings.SSE_CHUNK_SIZE)
+# precomputed 답변을 작은 청크로 나눌 때 사용할 크기 (settings.SSE_CHUNK_SIZE)
 
 _TRANSLATE_LANG_MAP = {
     "en": "English",
@@ -123,6 +123,45 @@ class SSEGraphAdapter:
                     yield self._format_sse({"type": SSEType.ANSWER, "content": accumulated})
 
     # ------------------------------------------------------------------
+    # 레퍼런스/RAG 문서 수집 헬퍼
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _collect_refs_and_docs(agent_answers: list) -> tuple:
+        """agent_answers에서 중복 없이 refs와 rag_docs를 수집한다."""
+        all_refs = []
+        all_rag_docs = []
+        for ans in agent_answers:
+            for ref in ans.get("sources", []):
+                if ref not in all_refs:
+                    all_refs.append(ref)
+            for doc in ans.get("rag_docs", []):
+                all_rag_docs.append(doc)
+        return all_refs, all_rag_docs
+
+    async def _enhance_refs_with_download_urls(
+        self, all_refs: list, invoke_id: str
+    ) -> None:
+        """all_refs에 다운로드 URL을 in-place로 추가한다 (Open 모드 전용)."""
+        sources = [ref.get("source") for ref in all_refs if ref.get("source")]
+        if not sources:
+            return
+        metadata_map = await qdrant_service.get_document_metadata_by_source(invoke_id, sources)
+        for ref in all_refs:
+            source = ref.get("source")
+            if source and source in metadata_map:
+                metadata = metadata_map[source]
+                file_path = self._resolve_file_path(invoke_id, source, metadata)
+                if file_path:
+                    link_info = download_service.create_download_link_from_path(
+                        file_path=file_path,
+                        filename=source,
+                        expires_in_seconds=3600,
+                        one_time=False,
+                    )
+                    if link_info:
+                        ref["download_url"] = link_info["download_url"]
+
+    # ------------------------------------------------------------------
     # 파일 경로 해석 유틸리티
     # ------------------------------------------------------------------
     def _resolve_file_path(
@@ -153,44 +192,14 @@ class SSEGraphAdapter:
 
         # 레퍼런스 전송
         agent_answers = final_state.get("agent_answers", [])
-        all_refs = []
-        all_rag_docs = []
-        for ans in agent_answers:
-            for ref in ans.get("sources", []):
-                if ref not in all_refs:
-                    all_refs.append(ref)
-            # RAG 문서 수집 (디버깅용)
-            for doc in ans.get("rag_docs", []):
-                all_rag_docs.append(doc)
+        all_refs, all_rag_docs = self._collect_refs_and_docs(agent_answers)
 
         # Open API인 경우에만 다운로드 URL 추가 (filter_filename=None)
         is_open_mode = final_state.get("filter_filename") is None
         invoke_id = final_state.get("invoke_id", "")
 
         if all_refs and is_open_mode:
-            # source 목록 추출
-            sources = [ref.get("source") for ref in all_refs if ref.get("source")]
-            if sources:
-                # 메타데이터 조회
-                metadata_map = await qdrant_service.get_document_metadata_by_source(
-                    invoke_id, sources
-                )
-
-                # 각 reference에 download_url 추가
-                for ref in all_refs:
-                    source = ref.get("source")
-                    if source and source in metadata_map:
-                        metadata = metadata_map[source]
-                        file_path = self._resolve_file_path(invoke_id, source, metadata)
-                        if file_path:
-                            link_info = download_service.create_download_link_from_path(
-                                file_path=file_path,
-                                filename=source,
-                                expires_in_seconds=3600,
-                                one_time=False
-                            )
-                            if link_info:
-                                ref["download_url"] = link_info["download_url"]
+            await self._enhance_refs_with_download_urls(all_refs, invoke_id)
 
         if all_refs:
             yield self._format_sse({"type": SSEType.REFERENCES, "docs": all_refs})
@@ -210,34 +219,13 @@ class SSEGraphAdapter:
     async def _emit_references(self, final_state: dict) -> AsyncGenerator[bytes, None]:
         """references + rag_documents SSE emit (한국어 스트리밍 없이)"""
         agent_answers = final_state.get("agent_answers", [])
-        all_refs = []
-        all_rag_docs = []
-        for ans in agent_answers:
-            for ref in ans.get("sources", []):
-                if ref not in all_refs:
-                    all_refs.append(ref)
-            for doc in ans.get("rag_docs", []):
-                all_rag_docs.append(doc)
+        all_refs, all_rag_docs = self._collect_refs_and_docs(agent_answers)
 
         is_open_mode = final_state.get("filter_filename") is None
         invoke_id = final_state.get("invoke_id", "")
 
         if all_refs and is_open_mode:
-            sources = [ref.get("source") for ref in all_refs if ref.get("source")]
-            if sources:
-                metadata_map = await qdrant_service.get_document_metadata_by_source(invoke_id, sources)
-                for ref in all_refs:
-                    source = ref.get("source")
-                    if source and source in metadata_map:
-                        metadata = metadata_map[source]
-                        file_path = self._resolve_file_path(invoke_id, source, metadata)
-                        if file_path:
-                            link_info = download_service.create_download_link_from_path(
-                                file_path=file_path, filename=source,
-                                expires_in_seconds=3600, one_time=False
-                            )
-                            if link_info:
-                                ref["download_url"] = link_info["download_url"]
+            await self._enhance_refs_with_download_urls(all_refs, invoke_id)
 
         if all_refs:
             yield self._format_sse({"type": SSEType.REFERENCES, "docs": all_refs})

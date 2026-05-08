@@ -136,6 +136,29 @@ class QdrantService:
         logger.info(f"[Qdrant] Upserted {len(points)} documents (hybrid) for invoke_id={invoke_id}")
         return len(points)
 
+    @staticmethod
+    def _normalize_sparse_scores(points) -> Dict[Any, float]:
+        """Sparse 검색 결과를 Min-Max 정규화하여 반환"""
+        if not points:
+            return {}
+        scores = [p.score for p in points]
+        min_s, max_s = min(scores), max(scores)
+        range_s = max_s - min_s
+        if range_s == 0:
+            return {p.id: 1.0 if p.score > 0 else 0.0 for p in points}
+        return {p.id: (p.score - min_s) / range_s for p in points}
+
+    @staticmethod
+    def _combine_scores(
+        dense_scores: Dict, sparse_scores: Dict, dense_weight: float, sparse_weight: float
+    ) -> Dict:
+        """Dense/Sparse 점수를 가중 합계로 병합"""
+        all_ids = set(dense_scores.keys()) | set(sparse_scores.keys())
+        return {
+            pid: dense_weight * dense_scores.get(pid, 0.0) + sparse_weight * sparse_scores.get(pid, 0.0)
+            for pid in all_ids
+        }
+
     def _build_filter(self, invoke_id: str, filter_source: Optional[str]) -> models.Filter:
         """공통 필터 조건 생성 (invoke_id + 파일명 + 글로벌 문서 필터)"""
         conditions = [
@@ -262,30 +285,10 @@ class QdrantService:
                 ),
             )
 
-            # 3. Dense는 코사인 유사도(0~1), Sparse만 Min-Max 정규화
+            # 3. Dense는 코사인 유사도(0~1), Sparse만 Min-Max 정규화 후 가중 합계
             dense_scores = {p.id: p.score for p in dense_results.points}
-
-            sparse_scores = {}
-            if sparse_results.points:
-                scores = [p.score for p in sparse_results.points]
-                min_s, max_s = min(scores), max(scores)
-                range_s = max_s - min_s
-                if range_s == 0:
-                    # 결과가 1개이거나 모든 점수가 동일한 경우
-                    sparse_scores = {p.id: 1.0 if p.score > 0 else 0.0 for p in sparse_results.points}
-                else:
-                    sparse_scores = {
-                        p.id: (p.score - min_s) / range_s
-                        for p in sparse_results.points
-                    }
-
-            # 4. 가중 합계
-            all_ids = set(dense_scores.keys()) | set(sparse_scores.keys())
-            combined_scores = {}
-            for pid in all_ids:
-                d_score = dense_scores.get(pid, 0.0)
-                s_score = sparse_scores.get(pid, 0.0)
-                combined_scores[pid] = dense_weight * d_score + sparse_weight * s_score
+            sparse_scores = self._normalize_sparse_scores(sparse_results.points)
+            combined_scores = self._combine_scores(dense_scores, sparse_scores, dense_weight, sparse_weight)
 
             # 5. 정렬 및 top_k
             sorted_ids = sorted(combined_scores.keys(), key=lambda x: combined_scores[x], reverse=True)[:top_k]

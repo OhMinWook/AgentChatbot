@@ -60,67 +60,81 @@ class SSEGraphAdapter:
     # ------------------------------------------------------------------
     # 토큰 스트리밍 헬퍼
     # ------------------------------------------------------------------
+    async def _emit_precomputed_chunks(
+        self, content: str, translate_to: Optional[str]
+    ) -> AsyncGenerator[bytes, None]:
+        """precomputed 답변을 청크 단위로 전송. 번역 구분자가 있으면 ANSWER/TRANSLATION 분리."""
+        DELIMITER = "[TRANSLATION]"
+        content = self._normalize_markdown(content)
+        if translate_to and DELIMITER in content:
+            korean, _, translation = content.partition(DELIMITER)
+            korean = korean.strip()
+            translation = translation.strip()
+            for i in range(0, len(korean), settings.SSE_CHUNK_SIZE):
+                yield self._format_sse({"type": SSEType.ANSWER, "content": korean[i:i + settings.SSE_CHUNK_SIZE]})
+            for i in range(0, len(translation), settings.SSE_CHUNK_SIZE):
+                yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": translation[i:i + settings.SSE_CHUNK_SIZE]})
+        else:
+            for i in range(0, len(content), settings.SSE_CHUNK_SIZE):
+                yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + settings.SSE_CHUNK_SIZE]})
+
+    async def _emit_streamed_tokens(
+        self, messages: list, max_tokens: int, translate_to: Optional[str]
+    ) -> AsyncGenerator[bytes, None]:
+        """LLM 스트리밍으로 토큰 단위 전송. [TRANSLATION] 구분자 기준으로 ANSWER/TRANSLATION 이벤트 분리."""
+        DELIMITER = "[TRANSLATION]"
+        D_LEN = len(DELIMITER)
+        accumulated = ""
+        in_translation = False
+
+        async for token in stream_llm_tokens(messages, max_tokens):
+            if token:
+                token = re.sub(r"\*+", "", token)
+                accumulated += token
+
+                if not in_translation:
+                    idx = accumulated.find(DELIMITER)
+                    if idx != -1:
+                        before = accumulated[:idx].rstrip("\n")
+                        after = accumulated[idx + D_LEN:].lstrip("\n")
+                        if before:
+                            yield self._format_sse({"type": SSEType.ANSWER, "content": before})
+                        in_translation = True
+                        accumulated = after
+                        if accumulated and translate_to:
+                            yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
+                        accumulated = ""
+                    else:
+                        safe_len = max(0, len(accumulated) - D_LEN)
+                        if safe_len > 0:
+                            yield self._format_sse({"type": SSEType.ANSWER, "content": accumulated[:safe_len]})
+                            accumulated = accumulated[safe_len:]
+                else:
+                    if translate_to and accumulated:
+                        yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
+                    accumulated = ""
+
+        if accumulated:
+            if in_translation and translate_to:
+                yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
+            else:
+                yield self._format_sse({"type": SSEType.ANSWER, "content": accumulated})
+
     async def _stream_answer_tokens(
         self, streaming_payload: dict, t_start: float = None
     ) -> AsyncGenerator[bytes, None]:
-        """streaming_payload를 기반으로 answer 이벤트를 청크 단위로 전송.
-        translate_to가 있으면 [TRANSLATION] 구분자 기준으로 ANSWER/TRANSLATION 이벤트 분리."""
+        """streaming_payload 모드에 따라 precomputed 또는 스트리밍 경로로 분기."""
         translate_to = streaming_payload.get("translate_to")
-        DELIMITER = "[TRANSLATION]"
-        D_LEN = len(DELIMITER)
-
         if streaming_payload.get("precomputed"):
-            content = self._normalize_markdown(streaming_payload.get("content", ""))
-            if translate_to and DELIMITER in content:
-                korean, _, translation = content.partition(DELIMITER)
-                korean = korean.strip()
-                translation = translation.strip()
-                for i in range(0, len(korean), settings.SSE_CHUNK_SIZE):
-                    yield self._format_sse({"type": SSEType.ANSWER, "content": korean[i:i + settings.SSE_CHUNK_SIZE]})
-                for i in range(0, len(translation), settings.SSE_CHUNK_SIZE):
-                    yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": translation[i:i + settings.SSE_CHUNK_SIZE]})
-            else:
-                for i in range(0, len(content), settings.SSE_CHUNK_SIZE):
-                    yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + settings.SSE_CHUNK_SIZE]})
+            async for chunk in self._emit_precomputed_chunks(streaming_payload.get("content", ""), translate_to):
+                yield chunk
         else:
-            messages = streaming_payload.get("messages", [])
-            max_tokens = streaming_payload.get("max_tokens", 2048)
-
-            accumulated = ""
-            in_translation = False
-
-            async for token in stream_llm_tokens(messages, max_tokens):
-                if token:
-                    token = re.sub(r"\*+", "", token)
-                    accumulated += token
-
-                    if not in_translation:
-                        idx = accumulated.find(DELIMITER)
-                        if idx != -1:
-                            before = accumulated[:idx].rstrip("\n")
-                            after = accumulated[idx + D_LEN:].lstrip("\n")
-                            if before:
-                                yield self._format_sse({"type": SSEType.ANSWER, "content": before})
-                            in_translation = True
-                            accumulated = after
-                            if accumulated and translate_to:
-                                yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
-                            accumulated = ""
-                        else:
-                            safe_len = max(0, len(accumulated) - D_LEN)
-                            if safe_len > 0:
-                                yield self._format_sse({"type": SSEType.ANSWER, "content": accumulated[:safe_len]})
-                                accumulated = accumulated[safe_len:]
-                    else:
-                        if translate_to and accumulated:
-                            yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
-                        accumulated = ""
-
-            if accumulated:
-                if in_translation and translate_to:
-                    yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
-                else:
-                    yield self._format_sse({"type": SSEType.ANSWER, "content": accumulated})
+            async for chunk in self._emit_streamed_tokens(
+                streaming_payload.get("messages", []),
+                streaming_payload.get("max_tokens", 2048),
+                translate_to,
+            ):
+                yield chunk
 
     # ------------------------------------------------------------------
     # 레퍼런스/RAG 문서 수집 헬퍼

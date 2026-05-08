@@ -1,12 +1,21 @@
 import secrets
 import json
 import os
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Dict, Any
 from pathlib import Path
 
 from app.core.config import settings
 from app.core.redis_client import sync_redis
+
+
+@dataclass
+class DownloadLinkConfig:
+    """다운로드 링크 생성 옵션"""
+    expires_in_seconds: int = 3600
+    one_time: bool = True
+    media_type: str = "application/octet-stream"
 
 
 class DownloadService:
@@ -30,61 +39,47 @@ class DownloadService:
         self,
         file_bytes: bytes,
         filename: str,
-        expires_in_seconds: int = 3600,
-        one_time: bool = True,
-        media_type: str = "application/octet-stream"
+        config: Optional[DownloadLinkConfig] = None,
     ) -> Dict[str, Any]:
         """
         다운로드 링크를 생성합니다.
 
         :param file_bytes: 다운로드할 파일의 바이트 데이터
         :param filename: 다운로드 시 사용할 파일명
-        :param expires_in_seconds: 링크 만료 시간 (초 단위, 기본 1시간)
-        :param one_time: True면 1회 다운로드 후 링크 무효화
-        :param media_type: 파일의 MIME 타입
+        :param config: 링크 옵션 (만료 시간, 1회용 여부, MIME 타입)
         :return: {"token": str, "download_url": str, "expires_at": str}
         """
-        # 고유 토큰 생성 (URL-safe)
+        cfg = config or DownloadLinkConfig()
         token = secrets.token_urlsafe(32)
 
-        # 파일을 디스크에 저장
         file_path = self.DOWNLOAD_DIR / f"{token}_{filename}"
         with open(file_path, "wb") as f:
             f.write(file_bytes)
 
-        # 토큰 정보를 Redis에 저장
         token_data = {
             "file_path": str(file_path),
             "filename": filename,
-            "media_type": media_type,
-            "one_time": one_time,
+            "media_type": cfg.media_type,
+            "one_time": cfg.one_time,
             "created_at": datetime.now().isoformat()
         }
 
         redis_key = f"{self.TOKEN_PREFIX}{token}"
-        self.redis.setex(
-            redis_key,
-            expires_in_seconds,
-            json.dumps(token_data)
-        )
+        self.redis.setex(redis_key, cfg.expires_in_seconds, json.dumps(token_data))
 
-        # 만료 시간 계산
-        expires_at = datetime.now().timestamp() + expires_in_seconds
-
+        expires_at = datetime.now().timestamp() + cfg.expires_in_seconds
         return {
             "token": token,
             "download_url": f"{settings.DOWNLOAD_URL_PREFIX}/{token}",
             "expires_at": datetime.fromtimestamp(expires_at).isoformat(),
-            "one_time": one_time
+            "one_time": cfg.one_time
         }
 
     def create_download_link_from_path(
         self,
         file_path: str,
         filename: str,
-        expires_in_seconds: int = 3600,
-        one_time: bool = False,
-        media_type: str = "application/octet-stream"
+        config: Optional[DownloadLinkConfig] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         기존 파일에 대한 다운로드 링크 생성 (파일 복사 없이)
@@ -100,34 +95,27 @@ class DownloadService:
         if not os.path.exists(file_path):
             return None
 
-        # 고유 토큰 생성 (URL-safe)
+        cfg = config or DownloadLinkConfig(one_time=False)
         token = secrets.token_urlsafe(32)
 
-        # 토큰 정보를 Redis에 저장 (원본 파일 경로 사용)
         token_data = {
             "file_path": file_path,
             "filename": filename,
-            "media_type": media_type,
-            "one_time": one_time,
+            "media_type": cfg.media_type,
+            "one_time": cfg.one_time,
             "is_reference": True,  # 원본 파일 참조 (삭제하지 않음)
             "created_at": datetime.now().isoformat()
         }
 
         redis_key = f"{self.TOKEN_PREFIX}{token}"
-        self.redis.setex(
-            redis_key,
-            expires_in_seconds,
-            json.dumps(token_data)
-        )
+        self.redis.setex(redis_key, cfg.expires_in_seconds, json.dumps(token_data))
 
-        # 만료 시간 계산
-        expires_at = datetime.now().timestamp() + expires_in_seconds
-
+        expires_at = datetime.now().timestamp() + cfg.expires_in_seconds
         return {
             "token": token,
             "download_url": f"{settings.DOWNLOAD_URL_PREFIX}/{token}",
             "expires_at": datetime.fromtimestamp(expires_at).isoformat(),
-            "one_time": one_time
+            "one_time": cfg.one_time
         }
 
     def get_file_info(self, token: str) -> Optional[Dict[str, Any]]:

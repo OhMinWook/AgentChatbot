@@ -11,6 +11,8 @@ from typing import Optional
 
 import httpx
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,7 +69,7 @@ class BaseAPIClient:
         self,
         method: str,
         url: str,
-        max_retries: int = 2,
+        max_retries: int = None,
         **kwargs,
     ) -> httpx.Response:
         """
@@ -76,12 +78,14 @@ class BaseAPIClient:
         Args:
             method: HTTP 메서드 (GET, POST, DELETE 등)
             url: 요청 URL
-            max_retries: 최대 재시도 횟수 (기본 2회, 총 3회 시도)
+            max_retries: 최대 재시도 횟수 (기본 settings.MAX_API_RETRIES)
             **kwargs: httpx 요청 인자 (json, headers, timeout 등)
 
         Returns:
             httpx.Response
         """
+        if max_retries is None:
+            max_retries = settings.MAX_API_RETRIES
         last_error = None
 
         for attempt in range(max_retries + 1):

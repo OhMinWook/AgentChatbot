@@ -99,6 +99,7 @@ class Settings(BaseModel):
     MODEL_SERVER_EMBED_TIMEOUT: float = float(os.getenv("MODEL_SERVER_EMBED_TIMEOUT", "600"))
     MODEL_SERVER_QUERY_TIMEOUT: float = float(os.getenv("MODEL_SERVER_QUERY_TIMEOUT", "30"))
     SSE_QUEUE_TIMEOUT: float = float(os.getenv("SSE_QUEUE_TIMEOUT", "600"))
+    MAX_API_RETRIES: int = int(os.getenv("MAX_API_RETRIES", "2"))
 
     # [문서 처리]
     CHUNK_SEPARATOR: str = "\n\n---\n\n"

@@ -74,6 +74,7 @@ def is_high_risk_question(question: str) -> bool:
 # ── LLM 호출 헬퍼 ─────────────────────────────────────────────────────────────
 
 from app.services.api_clients.llm_utils import call_llm, strip_think_blocks, strip_markdown_codeblock, stream_llm_tokens  # noqa: E402
+from app.services.utils.sse_utils import TRANSLATE_LANG_NAMES  # noqa: E402
 
 
 # ── process_question 헬퍼 ────────────────────────────────────────────────────
@@ -85,19 +86,13 @@ def build_agent_messages(agent_prompt, question: str, doc_res: Dict, translate_t
         return None
     user_content = agent_prompt.user.format(context=doc_context, question=question)
     if translate_to:
-        lang_name = _TRANSLATE_LANG_NAMES.get(translate_to, translate_to)
+        lang_name = TRANSLATE_LANG_NAMES.get(translate_to, translate_to)
         user_content += f'\n\n답변 작성 후 반드시 새 줄에 "[TRANSLATION]"을 출력하고, 이어서 위 답변 전체를 {lang_name}으로 번역하여 출력하세요.'
     return [
         {"role": "system", "content": agent_prompt.system},
         {"role": "user", "content": user_content}
     ]
 
-
-_TRANSLATE_LANG_NAMES = {
-    "en": "English",
-    "zh": "Chinese (Simplified)",
-    "ja": "Japanese",
-}
 
 
 @observe()

@@ -2,7 +2,6 @@
 DB Agent SSE 어댑터 (토큰 스트리밍 지원)
 """
 
-import json
 import logging
 import re
 import time
@@ -13,7 +12,7 @@ from app.core.langfuse_client import observe  # langfuse 비활성화 스텁
 from app.services.db_agent.agent import db_main_agent
 from app.core.config import settings
 from app.services.api_clients.llm_utils import stream_llm_tokens
-from app.services.utils.sse_utils import SSEType
+from app.services.utils.sse_utils import SSEType, normalize_markdown, format_sse_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +57,7 @@ class DBSSEAdapter:
                 first_token_logged = True
 
         if payload.get("precomputed"):
-            content = self._normalize_markdown(payload.get("content", ""))
+            content = normalize_markdown(payload.get("content", ""))
             for i in range(0, len(content), settings.SSE_CHUNK_SIZE):
                 log_ttft()
                 yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + settings.SSE_CHUNK_SIZE]})
@@ -71,15 +70,8 @@ class DBSSEAdapter:
                     log_ttft()
                     yield self._format_sse({"type": SSEType.ANSWER, "content": token})
 
-    @staticmethod
-    def _normalize_markdown(text: str) -> str:
-        text = re.sub(r"\*+", "", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text.strip()
-
     def _format_sse(self, data: Dict[str, Any]) -> bytes:
-        json_str = json.dumps(data, ensure_ascii=False)
-        return f"data: {json_str}\n\n".encode("utf-8")
+        return format_sse_bytes(data)
 
 
 db_sse_adapter = DBSSEAdapter()

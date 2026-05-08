@@ -22,6 +22,26 @@ class SSEType(str, Enum):
     TRANSLATION = "translation"  # 번역 결과
 
 
+TRANSLATE_LANG_NAMES: Dict[str, str] = {
+    "en": "English",
+    "zh": "Chinese (Simplified)",
+    "ja": "Japanese",
+}
+
+
+def normalize_markdown(text: str) -> str:
+    """** 제거 및 연속 빈 줄 정규화"""
+    import re
+    text = re.sub(r"\*+", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def format_sse_bytes(data: dict) -> bytes:
+    """dict를 SSE bytes로 변환"""
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
 def create_sse_data(data: dict) -> str:
     """이벤트 없이 data만 포함하는 SSE 메시지 생성
 

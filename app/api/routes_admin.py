@@ -28,6 +28,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 
+def _build_document_items(docs: list) -> list:
+    return [
+        DocumentItem(
+            adminId=doc.get("admin_id", ""),
+            adminName=doc.get("admin_name", ""),
+            index=doc.get("index", 0),
+            key=doc.get("key", ""),
+            fileName=doc.get("file_name", ""),
+            length=doc.get("file_size", 0),
+            registDate=doc.get("regist_date", ""),
+            isUse=doc.get("is_use", True),
+        )
+        for doc in docs
+    ]
+
+
 @router.post("/add_documents", response_model=AdminBaseResponse)
 async def add_document(
     key: str = Form(..., description="문서 고유 키"),
@@ -140,19 +156,7 @@ async def get_documents(
             order=order,
         )
 
-        items = [
-            DocumentItem(
-                adminId=doc.get("admin_id", ""),
-                adminName=doc.get("admin_name", ""),
-                index=doc.get("index", 0),
-                key=doc.get("key", ""),
-                fileName=doc.get("file_name", ""),
-                length=doc.get("file_size", 0),
-                registDate=doc.get("regist_date", ""),
-                isUse=doc.get("is_use", True),
-            )
-            for doc in docs
-        ]
+        items = _build_document_items(docs)
 
         return DocumentListResponse(
             code="0000",
@@ -200,19 +204,7 @@ async def search_documents(
             )
         )
 
-        items = [
-            DocumentItem(
-                adminId=doc.get("admin_id", ""),
-                adminName=doc.get("admin_name", ""),
-                index=doc.get("index", 0),
-                key=doc.get("key", ""),
-                fileName=doc.get("file_name", ""),
-                length=doc.get("file_size", 0),
-                registDate=doc.get("regist_date", ""),
-                isUse=doc.get("is_use", True),
-            )
-            for doc in docs
-        ]
+        items = _build_document_items(docs)
 
         return DocumentListResponse(
             code="0000",

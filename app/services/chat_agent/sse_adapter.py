@@ -19,17 +19,11 @@ from app.services.chat_agent.node_utils import stream_llm_tokens, call_llm
 from app.services.rag.qdrant_service import qdrant_service
 from app.services.utils.answer_cache_service import answer_cache_service
 from app.services.utils.download_service import download_service
-from app.services.utils.sse_utils import SSEType
+from app.services.utils.sse_utils import SSEType, normalize_markdown, format_sse_bytes, TRANSLATE_LANG_NAMES
 
 logger = logging.getLogger(__name__)
 
 # precomputed 답변을 작은 청크로 나눌 때 사용할 크기 (settings.SSE_CHUNK_SIZE)
-
-_TRANSLATE_LANG_MAP = {
-    "en": "English",
-    "zh": "Chinese (Simplified)",
-    "ja": "Japanese",
-}
 
 # pending_threads TTL (초)
 class SSEGraphAdapter:
@@ -46,15 +40,6 @@ class SSEGraphAdapter:
         """대기 중인 human-in-the-loop 세션 폐기 (현재 MemorySaver 사용으로 별도 처리 불필요)"""
         pass
 
-    # ------------------------------------------------------------------
-    # 마크다운 정규화
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _normalize_markdown(text: str) -> str:
-        text = re.sub(r"\*+", "", text)  # ** 제거
-        text = re.sub(r"\n{3,}", "\n\n", text)  # 연속 빈 줄 → 최대 2줄
-        text = text.strip()
-        return text
 
 
     # ------------------------------------------------------------------
@@ -65,7 +50,7 @@ class SSEGraphAdapter:
     ) -> AsyncGenerator[bytes, None]:
         """precomputed 답변을 청크 단위로 전송. 번역 구분자가 있으면 ANSWER/TRANSLATION 분리."""
         DELIMITER = "[TRANSLATION]"
-        content = self._normalize_markdown(content)
+        content = normalize_markdown(content)
         if translate_to and DELIMITER in content:
             korean, _, translation = content.partition(DELIMITER)
             korean = korean.strip()
@@ -251,7 +236,7 @@ class SSEGraphAdapter:
     # ------------------------------------------------------------------
     async def _stream_translation(self, text: str, translate_to: str) -> AsyncGenerator[bytes, None]:
         """한국어 답변을 지정 언어로 번역 후 SSE 스트리밍"""
-        lang_name = _TRANSLATE_LANG_MAP.get(translate_to, translate_to)
+        lang_name = TRANSLATE_LANG_NAMES.get(translate_to, translate_to)
         messages = [
             {
                 "role": "system",
@@ -398,7 +383,6 @@ class SSEGraphAdapter:
             yield self._format_sse({"type": SSEType.ERROR, "message": str(e)})
 
     def _format_sse(self, data: Dict[str, Any]) -> bytes:
-        json_str = json.dumps(data, ensure_ascii=False)
-        return f"data: {json_str}\n\n".encode("utf-8")
+        return format_sse_bytes(data)
 
 sse_graph_adapter = SSEGraphAdapter()

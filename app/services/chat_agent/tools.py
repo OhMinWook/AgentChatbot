@@ -6,7 +6,7 @@ LangGraph 도구 정의
 
 import asyncio
 import logging
-from html import escape as html_escape
+from html import escape as html_escape, unescape as html_unescape
 from typing import List, Dict, Any
 from app.core.langfuse_client import observe  # langfuse 비활성화 스텁
 from app.services.api_clients.model_server_client import model_server_client
@@ -15,6 +15,10 @@ from app.services.rag.sparse_encoder import sparse_encoder
 from app.services.rag.text_utils import add_source_prefix
 from app.core.config import settings
 from app.services.agent_base.tool import BaseTool
+from app.services.chat_agent.prompts import HYDE_GENERATOR
+from app.services.api_clients.llm_utils import strip_think_blocks
+from app.services.api_clients.llm_client import llm_client
+from app.services.utils.llm_payload import build_chat_payload
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +69,12 @@ class SearchTool(BaseTool):
         logger.info(f"[Search] query: {query[:50]}...")
         logger.debug(f"[Search] invoke_id: {self.invoke_id}, top_k: {k}, filter: {filter_filename}")
 
-        # 1. Dense 쿼리 임베딩 생성
-        embeddings = await model_server_client.embed_texts([query], is_query=True)
+        # 1. Dense 쿼리 임베딩 생성 (HyDE 활성화 시 가상 답변으로 대체)
+        embed_text = query
+        if settings.HYDE_ENABLED:
+            embed_text = await self._generate_hypothetical_answer(query)
+
+        embeddings = await model_server_client.embed_texts([embed_text], is_query=True)
         if not embeddings:
             logger.error(f"[Search] 임베딩 생성 실패 — 모델 서버 응답 없음 (query: {query[:50]})")
             return {"context": None, "references": [], "results": []}
@@ -334,8 +342,10 @@ class SearchTool(BaseTool):
                 continue
             seen_contents.add(content_key)
 
-            # XML 특수문자 이스케이프
-            escaped_content = html_escape(content, quote=False)
+            # XML 구조를 깨는 문자만 이스케이프 (> 는 텍스트 내용에서 불필요)
+            # html_unescape로 기존 엔티티 정규화 후 < 와 & 만 이스케이프
+            clean_content = html_unescape(content)
+            escaped_content = clean_content.replace("&", "&amp;").replace("<", "&lt;")
             escaped_source = html_escape(str(source), quote=True)
             formatted_doc = f'<document source="{escaped_source}" page="{page}">\n{escaped_content}\n</document>'
             valid_docs.append(formatted_doc)
@@ -344,6 +354,26 @@ class SearchTool(BaseTool):
             return None
 
         return "<documents>\n" + "\n".join(valid_docs) + "\n</documents>"
+
+    async def _generate_hypothetical_answer(self, query: str) -> str:
+        """HyDE: 질문에 대한 가상 답변 생성 후 반환. 실패 시 원본 쿼리 반환."""
+        try:
+            payload = build_chat_payload(
+                messages=[
+                    {"role": "system", "content": HYDE_GENERATOR.system},
+                    {"role": "user", "content": HYDE_GENERATOR.user.format(question=query)},
+                ],
+                max_tokens=settings.HYDE_MAX_TOKENS,
+            )
+            response = await llm_client.chat_completions(payload)
+            raw = llm_client.extract_content(response)
+            hypothetical = strip_think_blocks(raw).strip()
+            if hypothetical:
+                logger.info(f"[HyDE] 가상 답변 생성: {hypothetical[:100]}")
+                return hypothetical
+        except Exception as e:
+            logger.warning(f"[HyDE] 가상 답변 생성 실패 - 원본 쿼리 사용: {e}")
+        return query
 
     async def search_batch(self, queries: List[str], top_k: int = None, filter_filename: str = None) -> List[Dict[str, Any]]:
         """

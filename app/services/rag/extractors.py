@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 import time
+from html import unescape as html_unescape
 from concurrent.futures import ProcessPoolExecutor
 from typing import Generator, List, Optional, Tuple
 
@@ -554,8 +555,9 @@ class FileTextExtractor:
             result = await asyncio.to_thread(self._markitdown.convert, file_path)
             parse_elapsed = time.time() - parse_start
             if result and result.text_content:
-                logger.info(f"[Extractor] MarkItDown 텍스트 추출 완료: {len(result.text_content)}자, {parse_elapsed:.2f}초")
-                return result.text_content
+                text = html_unescape(result.text_content)
+                logger.info(f"[Extractor] MarkItDown 텍스트 추출 완료: {len(text)}자, {parse_elapsed:.2f}초")
+                return text
             return None
         except Exception as e:
             logger.error(f"[Extractor] MarkItDown 오류: {e}")

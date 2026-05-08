@@ -15,7 +15,7 @@ class Settings(BaseModel):
     QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))
     QDRANT_COLLECTION: str = os.getenv("QDRANT_COLLECTION", "documents")
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploaded_files")
-    RERANK_SCORE_THRESHOLD: float = float(os.getenv("RERANK_SCORE_THRESHOLD", "0.55"))
+    RERANK_SCORE_THRESHOLD: float = float(os.getenv("RERANK_SCORE_THRESHOLD", "0.45"))
     RERANK_MIN_RESULTS: int = int(os.getenv("RERANK_MIN_RESULTS", "2"))
 
     # [LLM 기본 설정]
@@ -50,6 +50,10 @@ class Settings(BaseModel):
 
     # [Polaris 설정]
     POLARIS_ENABLED: bool = False
+
+    # [HyDE - Hypothetical Document Embedding]
+    HYDE_ENABLED: bool = os.getenv("HYDE_ENABLED", "true").lower() == "true"
+    HYDE_MAX_TOKENS: int = int(os.getenv("HYDE_MAX_TOKENS", "256"))
 
     # [Contextual Retrieval]
     CONTEXTUAL_RETRIEVAL_ENABLED: bool = os.getenv("CONTEXTUAL_RETRIEVAL_ENABLED", "false").lower() == "true"

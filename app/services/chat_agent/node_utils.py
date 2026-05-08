@@ -8,7 +8,8 @@ LangGraph 노드 공용 유틸리티
 import json
 import logging
 import re
-from typing import Dict, List, AsyncGenerator
+from dataclasses import dataclass
+from typing import Dict, List, Optional, AsyncGenerator
 
 from app.core.langfuse_client import observe, langfuse_context, langfuse  # langfuse 비활성화 스텁
 from app.services.api_clients.llm_client import llm_client
@@ -30,6 +31,26 @@ VERIFY_ANSWER_JSON_SCHEMA = {
     },
     "required": ["passed", "issues"]
 }
+
+# ── 데이터 클래스 ─────────────────────────────────────────────────────────────
+
+@dataclass
+class QuestionTask:
+    """단일 질문 처리 작업 단위"""
+    idx: int
+    question: str
+    doc_res: Dict
+    max_tokens: int
+    translate_to: Optional[str] = None
+
+
+@dataclass
+class VerifyResult:
+    """할루시네이션 검증 결과"""
+    passed: bool
+    issues: List[str]
+    question: str
+
 
 # ── 할루시네이션 위험도 ────────────────────────────────────────────────────────
 
@@ -102,11 +123,14 @@ _TRANSLATE_LANG_NAMES = {
 
 
 @observe()
-async def generate_single_answer(agent_prompt, idx: int, question: str, doc_res: Dict, max_tokens: int, translate_to: str = None) -> Dict:
+async def generate_single_answer(agent_prompt, task: QuestionTask) -> Dict:
     """단일 질문에 대해 검색 결과 기반 답변을 생성한다.
     - 고위험 질문: LLM pre-generate (검증용)
     - 저위험 질문: 스트리밍 준비만 (answer="")
     """
+    idx, question, doc_res, max_tokens, translate_to = (
+        task.idx, task.question, task.doc_res, task.max_tokens, task.translate_to
+    )
     references = doc_res.get("references", [])
     rag_docs = doc_res.get("results", [])
     context = doc_res.get("context", "")

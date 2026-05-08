@@ -18,6 +18,8 @@ from app.services.chat_agent.prompts import (
 )
 from app.services.chat_agent.node_utils import (
     VERIFY_ANSWER_JSON_SCHEMA,
+    QuestionTask,
+    VerifyResult,
     call_llm,
     generate_single_answer,
 )
@@ -78,7 +80,7 @@ def _record_hallucination_score(failed: list) -> None:
         if not trace_id:
             return
         score_value = 0.0 if failed else 1.0
-        comment = "; ".join(i for r in failed for i in r.get("issues", [])) if failed else "검증 통과"
+        comment = "; ".join(i for r in failed for i in r.issues) if failed else "검증 통과"
         langfuse.create_score(
             trace_id=trace_id,
             name="hallucination_check",
@@ -89,7 +91,7 @@ def _record_hallucination_score(failed: list) -> None:
         logger.debug(f"[Verify] Langfuse score 기록 실패 (무시): {e}")
 
 
-async def _verify_single_answer(answer: dict) -> dict:
+async def _verify_single_answer(answer: dict) -> VerifyResult:
     """단일 답변 할루시네이션 검증 수행"""
     question = answer.get("question", "")
     response = await call_llm(
@@ -117,7 +119,7 @@ async def _verify_single_answer(answer: dict) -> dict:
     else:
         logger.info(f"[Verify] 검증 통과 | 질문: {question[:50]}")
 
-    return {"passed": passed, "issues": issues, "question": question}
+    return VerifyResult(passed=passed, issues=issues, question=question)
 
 
 # ── process_question ──────────────────────────────────────────────────────────
@@ -149,7 +151,7 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
 
     t2 = time.perf_counter()
     all_results = await asyncio.gather(*[
-        generate_single_answer(agent_prompt, idx, questions[idx], search_results[idx], settings.DEFAULT_MAX_TOKENS, translate_to=translate_to)
+        generate_single_answer(agent_prompt, QuestionTask(idx, questions[idx], search_results[idx], settings.DEFAULT_MAX_TOKENS, translate_to))
         for idx in range(len(questions))
     ])
     t3 = time.perf_counter()
@@ -191,7 +193,7 @@ async def verify_answer_node(state: MainState) -> Dict[str, Any]:
         return {"verification_passed": True}
 
     results = await asyncio.gather(*[_verify_single_answer(a) for a in answers_to_verify])
-    failed = [r for r in results if not r["passed"]]
+    failed = [r for r in results if not r.passed]
     _record_hallucination_score(failed)
 
     if not failed:

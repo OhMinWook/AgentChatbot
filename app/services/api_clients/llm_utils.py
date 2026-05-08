@@ -10,7 +10,7 @@ LLM 호출 공통 헬퍼
 import json
 import logging
 import re
-from typing import Dict, List, AsyncGenerator
+from typing import AsyncGenerator, Dict, List, Optional
 
 from app.core.langfuse_client import observe  # langfuse 비활성화 스텁
 from app.services.api_clients.llm_client import llm_client
@@ -39,12 +39,23 @@ def strip_markdown_codeblock(text: str) -> str:
 
 
 @observe()
-async def call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json_schema: Dict = None) -> str:
-    """LLM 호출 헬퍼 — think 블록 자동 제거"""
+async def call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json_schema: Optional[Dict] = None) -> str:
+    """LLM 호출 헬퍼 — think 블록 자동 제거.
+
+    json_schema가 지정된 경우 <think> 블록을 제거하고 JSON 객체만 추출한다.
+    """
     try:
         payload = build_chat_payload(messages, max_tokens=max_tokens, json_schema=json_schema)
         response = await llm_client.chat_completions(payload)
         content = llm_client.extract_content(response)
+        if json_schema:
+            think_end = content.rfind("</think>")
+            if think_end != -1:
+                content = content[think_end + len("</think>"):].strip()
+            else:
+                content = re.sub(r"<think>[^{]*", "", content, flags=re.DOTALL).strip()
+            match = re.search(r"\{.*\}", content, flags=re.DOTALL)
+            return match.group(0) if match else content
         return strip_think_blocks(content)
     except Exception as e:
         logger.error(f"LLM call failed: {e}")

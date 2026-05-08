@@ -338,30 +338,28 @@ class AdminDocumentService:
             # 전체 문서 조회 (key별 그룹화)
             all_docs = await self._get_all_documents()
 
-            total_count = len(all_docs)
-
-            # 정렬
-            sort_field_map = {
-                "fileName": "file_name",
-                "registDate": "regist_date",
-            }
-            sort_key = sort_field_map.get(order_type, "regist_date")
-            is_descending = (order == "desc")
-            all_docs.sort(key=lambda x: x.get(sort_key, ""), reverse=is_descending)
-
-            # 페이지네이션 적용
-            start_idx = (page - 1) * size
-            end_idx = start_idx + size
-            paged_docs = all_docs[start_idx:end_idx]
-
-            # index 재할당 (페이지 내 순번)
-            for i, doc in enumerate(paged_docs):
-                doc["index"] = start_idx + i + 1
-
-            return paged_docs, total_count
+            return self._sort_and_paginate(all_docs, order_type, order, page, size)
         except Exception as e:
             logger.error(f"[AdminDocument] Get list failed: {e}")
             return [], 0
+
+    @staticmethod
+    def _sort_and_paginate(
+        docs: List[Dict], order_type: str, order: str, page: int, size: int
+    ) -> tuple[List[Dict], int]:
+        """정렬 + 페이지네이션 적용 후 (paged_docs, total_count) 반환."""
+        total_count = len(docs)
+        sort_field_map = {
+            "fileName": "file_name",
+            "registDate": "regist_date",
+        }
+        sort_key = sort_field_map.get(order_type, "regist_date")
+        docs.sort(key=lambda x: x.get(sort_key, ""), reverse=(order == "desc"))
+        start_idx = (page - 1) * size
+        paged = docs[start_idx:start_idx + size]
+        for i, doc in enumerate(paged):
+            doc["index"] = start_idx + i + 1
+        return paged, total_count
 
     async def _get_all_documents(self) -> List[Dict]:
         """모든 관리자 문서 조회 (key별 그룹화)"""
@@ -445,25 +443,7 @@ class AdminDocumentService:
                     if search_term_lower in str(doc.get(field, "")).lower()
                 ]
 
-            total_count = len(all_docs)
-
-            # 정렬
-            sort_field_map = {
-                "fileName": "file_name",
-                "registDate": "regist_date",
-            }
-            sort_key = sort_field_map.get(query.order_type, "regist_date")
-            is_descending = (query.order == "desc")
-            all_docs.sort(key=lambda x: x.get(sort_key, ""), reverse=is_descending)
-
-            start_idx = (query.page - 1) * query.size
-            end_idx = start_idx + query.size
-            paged_docs = all_docs[start_idx:end_idx]
-
-            for i, doc in enumerate(paged_docs):
-                doc["index"] = start_idx + i + 1
-
-            return paged_docs, total_count
+            return self._sort_and_paginate(all_docs, query.order_type, query.order, query.page, query.size)
         except Exception as e:
             logger.error(f"[AdminDocument] Search failed: {e}")
             return [], 0

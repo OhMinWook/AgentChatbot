@@ -102,13 +102,16 @@ class SearchTool(BaseTool):
             add_source_prefix(c.content, c.metadata.get("source", ""))
             for c in candidates
         ]
-        reranked = await model_server_client.rerank(
-            query=query,
-            documents=documents,
-            top_k=min(k * 3, len(candidates))  # 필터링 여유분
-        )
-
-        logger.info(f"[Search] Rerank 결과: {len(reranked)}개")
+        try:
+            reranked = await model_server_client.rerank(
+                query=query,
+                documents=documents,
+                top_k=min(k * 3, len(candidates))  # 필터링 여유분
+            )
+            logger.info(f"[Search] Rerank 결과: {len(reranked)}개")
+        except Exception as e:
+            logger.error(f"[Search] Reranker 호출 실패 — 원본 순서로 폴백: {e}")
+            reranked = [{"index": i, "score": 1.0} for i in range(len(candidates))]
 
         # 4. 결과 조합 (인접 청크 제외)
         results = self._rerank_and_filter(candidates, reranked, k)

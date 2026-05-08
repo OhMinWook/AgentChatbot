@@ -316,7 +316,7 @@ class QdrantService:
             ]
         except UnexpectedResponse as e:
             logger.error(f"[Qdrant] Hybrid search failed (invoke_id={invoke_id}, filter={filter_source}): {e}")
-            logger.warning("[Qdrant] Sparse 신호 손실 — Dense-only 검색으로 fallback")
+            logger.error("[Qdrant] Sparse 신호 손실 — Dense-only 검색으로 fallback")
             return await self.search(invoke_id, dense_embedding, top_k, filter_source)
 
     async def get_chunks_by_ids(

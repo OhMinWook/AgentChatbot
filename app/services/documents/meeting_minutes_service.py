@@ -11,10 +11,9 @@ from xml.etree import ElementTree as ET
 
 from app.services.api_clients.llm_utils import call_llm, strip_markdown_codeblock
 from app.services.documents.meeting_minutes_prompts import MEETING_MINUTES_EXTRACTOR
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
-
-MAX_ATTENDEES = 8
 
 
 class MeetingMinutesService:
@@ -66,7 +65,7 @@ class MeetingMinutesService:
         """Template3Processor가 기대하는 스키마로 정규화"""
         attendees_raw = data.get("attendees") or []
         attendees: List[Dict[str, str]] = []
-        for item in attendees_raw[:MAX_ATTENDEES]:
+        for item in attendees_raw[:settings.MAX_MEETING_ATTENDEES]:
             if not isinstance(item, dict):
                 continue
             attendees.append({

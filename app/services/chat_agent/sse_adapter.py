@@ -36,9 +36,6 @@ class SSEGraphAdapter:
     def _generate_thread_id(self, invoke_id: str) -> str:
         return f"{invoke_id}_{uuid.uuid4().hex[:8]}"
 
-    def cancel_pending(self, invoke_id: str) -> None:
-        """대기 중인 human-in-the-loop 세션 폐기 (현재 MemorySaver 사용으로 별도 처리 불필요)"""
-        pass
 
 
 

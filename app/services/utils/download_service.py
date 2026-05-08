@@ -73,7 +73,7 @@ class DownloadService:
 
         return {
             "token": token,
-            "download_url": f"/documents/download/{token}",
+            "download_url": f"{settings.DOWNLOAD_URL_PREFIX}/{token}",
             "expires_at": datetime.fromtimestamp(expires_at).isoformat(),
             "one_time": one_time
         }
@@ -125,7 +125,7 @@ class DownloadService:
 
         return {
             "token": token,
-            "download_url": f"/documents/download/{token}",
+            "download_url": f"{settings.DOWNLOAD_URL_PREFIX}/{token}",
             "expires_at": datetime.fromtimestamp(expires_at).isoformat(),
             "one_time": one_time
         }

@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 logger = logging.getLogger(__name__)
 
+from app.core.config import settings
 from app.services.documents.document_automater_service import document_automater_service
 from app.services.documents.meeting_minutes_service import meeting_minutes_service
 from app.services.utils.download_service import download_service
@@ -110,7 +111,7 @@ async def generate_hwpx_document_api(
         )
 
         # HWPX 파일의 MIME 타입
-        media_type = "application/haansofthwpml"
+        media_type = settings.HWPX_MEDIA_TYPE
         filename = f"generated_{template_name}"
 
         # 다운로드 링크 생성
@@ -249,7 +250,7 @@ async def generate_meeting_minutes_from_text(
 
             # 4단계: 다운로드 링크 생성 (90 -> 100%)
             yield _event("link", 95, "다운로드 링크 생성")
-            media_type = "application/haansofthwpml"
+            media_type = settings.HWPX_MEDIA_TYPE
             filename = "generated_meeting_minutes.hwpx"
             link_info = download_service.create_download_link(
                 file_bytes=generated_hwpx_bytes,

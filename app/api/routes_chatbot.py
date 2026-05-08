@@ -1,4 +1,3 @@
-import json
 import asyncio
 import logging
 from typing import Optional
@@ -31,9 +30,6 @@ async def upload_document(
     """
     RAG 검색을 위한 문서 업로드 엔드포인트 (SSE 스트리밍)
     """
-    # 명확화 대기 중인 세션이 있으면 폐기
-    sse_graph_adapter.cancel_pending(invokeId)
-
     try:
         # 파일 저장 (Path Traversal 방지 포함)
         # attachFile_name이 있으면 UploadFile의 filename을 덮어씀
@@ -224,8 +220,6 @@ async def summarize_document(
 
     SSE를 통해 실시간 진행률을 전송합니다.
     """
-    LARGE_DOC_CHUNK_THRESHOLD = 100
-
     async def event_stream():
         queue = asyncio.Queue()
         result_holder = {"payload": None, "refs": [], "error": None}
@@ -246,7 +240,7 @@ async def summarize_document(
 
                 search_tool = create_search_tool(invokeId)
 
-                if doc_info["total_chunks"] >= LARGE_DOC_CHUNK_THRESHOLD:
+                if doc_info["total_chunks"] >= settings.LARGE_DOC_CHUNK_THRESHOLD:
                     payload, refs = await document_summary_service.summarize_large(
                         search_tool, target_filename, on_progress
                     )

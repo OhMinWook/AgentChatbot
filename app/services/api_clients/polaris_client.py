@@ -91,8 +91,8 @@ class PolarisConverter:
         with tempfile.TemporaryDirectory(prefix="polaris_temp_") as temp_dir:
             command = [
                 "java",
-                "-Xms512m",   # 초기 힙 메모리 512MB
-                "-Xmx4g",     # 최대 힙 메모리 4GB (큰 문서 처리용)
+                f"-Xms{settings.POLARIS_JVM_XMS}",
+                f"-Xmx{settings.POLARIS_JVM_XMX}",
                 "-jar",
                 str(self.jar_path),
                 "DATA",

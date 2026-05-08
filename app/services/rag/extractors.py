@@ -41,7 +41,8 @@ def get_pdf_process_pool() -> ProcessPoolExecutor:
     """PDF 처리용 프로세스 풀 (lazy init)"""
     global _pdf_process_pool
     if _pdf_process_pool is None:
-        _pdf_process_pool = ProcessPoolExecutor(max_workers=8)
+        from app.core.config import settings
+        _pdf_process_pool = ProcessPoolExecutor(max_workers=settings.PDF_PROCESS_POOL_WORKERS)
     return _pdf_process_pool
 
 

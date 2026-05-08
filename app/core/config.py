@@ -100,4 +100,15 @@ class Settings(BaseModel):
     MODEL_SERVER_QUERY_TIMEOUT: float = float(os.getenv("MODEL_SERVER_QUERY_TIMEOUT", "30"))
     SSE_QUEUE_TIMEOUT: float = float(os.getenv("SSE_QUEUE_TIMEOUT", "600"))
 
+    # [문서 처리]
+    LARGE_DOC_CHUNK_THRESHOLD: int = int(os.getenv("LARGE_DOC_CHUNK_THRESHOLD", "100"))
+    MAX_MEETING_ATTENDEES: int = int(os.getenv("MAX_MEETING_ATTENDEES", "8"))
+    PDF_PROCESS_POOL_WORKERS: int = int(os.getenv("PDF_PROCESS_POOL_WORKERS", "8"))
+    HWPX_MEDIA_TYPE: str = "application/haansofthwpml"
+    DOWNLOAD_URL_PREFIX: str = os.getenv("DOWNLOAD_URL_PREFIX", "/documents/download")
+
+    # [Polaris JVM]
+    POLARIS_JVM_XMS: str = os.getenv("POLARIS_JVM_XMS", "512m")
+    POLARIS_JVM_XMX: str = os.getenv("POLARIS_JVM_XMX", "4g")
+
 settings = Settings()

@@ -28,6 +28,98 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+# ── 모듈 레벨 헬퍼 ────────────────────────────────────────────────────────────
+
+def _build_streaming_payload(answer: dict, translate_to) -> dict:
+    """answer dict에서 SSE 스트리밍 payload 구성"""
+    answer_text = answer.get("answer", "")
+    stream_messages = answer.get("messages")
+    if answer_text:
+        logger.info("[Process] 고위험 답변 precomputed 설정")
+        return {"precomputed": True, "content": answer_text, "translate_to": translate_to}
+    logger.info("[Process] 저위험 답변 스트리밍 준비")
+    return {
+        "precomputed": False,
+        "messages": stream_messages,
+        "max_tokens": settings.DEFAULT_MAX_TOKENS,
+        "translate_to": translate_to,
+    }
+
+
+def _record_reranker_scores(all_answers: list) -> None:
+    """Langfuse에 reranker 점수와 RAG 문서 수 기록"""
+    try:
+        trace_id = langfuse_context.get_current_trace_id()
+        if not trace_id:
+            return
+        scores = [
+            doc["score"]
+            for ans in all_answers
+            for doc in ans.get("rag_docs", [])
+            if isinstance(doc.get("score"), (int, float))
+        ]
+        if scores:
+            langfuse.create_score(
+                trace_id=trace_id,
+                name="reranker_score",
+                value=round(sum(scores) / len(scores), 4),
+                comment=f"청크 {len(scores)}개 평균",
+            )
+        langfuse.create_score(trace_id=trace_id, name="rag_doc_count", value=len(scores))
+        langfuse.create_score(trace_id=trace_id, name="cache_hit", value=0)
+    except Exception as e:
+        logger.debug(f"[Process] Langfuse reranker_score 기록 실패 (무시): {e}")
+
+
+def _record_hallucination_score(failed: list) -> None:
+    """Langfuse에 hallucination_check 점수 기록"""
+    try:
+        trace_id = langfuse_context.get_current_trace_id()
+        if not trace_id:
+            return
+        score_value = 0.0 if failed else 1.0
+        comment = "; ".join(i for r in failed for i in r.get("issues", [])) if failed else "검증 통과"
+        langfuse.create_score(
+            trace_id=trace_id,
+            name="hallucination_check",
+            value=score_value,
+            comment=comment,
+        )
+    except Exception as e:
+        logger.debug(f"[Verify] Langfuse score 기록 실패 (무시): {e}")
+
+
+async def _verify_single_answer(answer: dict) -> dict:
+    """단일 답변 할루시네이션 검증 수행"""
+    question = answer.get("question", "")
+    response = await call_llm(
+        [
+            {"role": "system", "content": VERIFY_ANSWER.system},
+            {"role": "user", "content": VERIFY_ANSWER.user.format(
+                context=answer.get("context", ""),
+                question=question,
+                answer=answer.get("answer", ""),
+            )},
+        ],
+        max_tokens=1024,
+        json_schema=VERIFY_ANSWER_JSON_SCHEMA,
+    )
+    try:
+        result = json.loads(strip_markdown_codeblock(response))
+        passed = result.get("passed", True)
+        issues = result.get("issues", [])
+    except json.JSONDecodeError:
+        logger.warning(f"[Verify] JSON 파싱 실패 - 통과 처리: {response[:100]}")
+        passed, issues = True, []
+
+    if not passed:
+        logger.warning(f"[Verify] 검증 실패 | 질문: {question[:50]} | 문제: {issues}")
+    else:
+        logger.info(f"[Verify] 검증 통과 | 질문: {question[:50]}")
+
+    return {"passed": passed, "issues": issues, "question": question}
+
+
 # ── process_question ──────────────────────────────────────────────────────────
 
 @observe()
@@ -74,56 +166,10 @@ async def process_question_node(state: MainState) -> Dict[str, Any]:
         "rag_docs": r.get("rag_docs", [])
     } for r in all_results]
 
-    # Langfuse reranker_score 기록
-    try:
-        trace_id = langfuse_context.get_current_trace_id()
-        if trace_id:
-            scores = [
-                doc["score"]
-                for ans in all_answers
-                for doc in ans.get("rag_docs", [])
-                if isinstance(doc.get("score"), (int, float))
-            ]
-            if scores:
-                avg_score = sum(scores) / len(scores)
-                langfuse.create_score(
-                    trace_id=trace_id,
-                    name="reranker_score",
-                    value=round(avg_score, 4),
-                    comment=f"청크 {len(scores)}개 평균"
-                )
-            langfuse.create_score(
-                trace_id=trace_id,
-                name="rag_doc_count",
-                value=len(scores),
-            )
-            langfuse.create_score(
-                trace_id=trace_id,
-                name="cache_hit",
-                value=0,
-            )
-    except Exception as e:
-        logger.debug(f"[Process] Langfuse reranker_score 기록 실패 (무시): {e}")
-
+    _record_reranker_scores(all_answers)
     logger.info(f"[Process] {len(all_answers)}개 답변 완료")
 
-    # streaming_payload 구성
-    answer = all_answers[0]
-    answer_text = answer.get("answer", "")
-    stream_messages = answer.get("messages")
-
-    if answer_text:
-        logger.info("[Process] 고위험 답변 precomputed 설정")
-        streaming_payload = {"precomputed": True, "content": answer_text, "translate_to": translate_to}
-    else:
-        logger.info("[Process] 저위험 답변 스트리밍 준비")
-        streaming_payload = {
-            "precomputed": False,
-            "messages": stream_messages,
-            "max_tokens": settings.DEFAULT_MAX_TOKENS,
-            "translate_to": translate_to
-        }
-
+    streaming_payload = _build_streaming_payload(all_answers[0], translate_to)
     return {"agent_answers": all_answers, "streaming_payload": streaming_payload}
 
 
@@ -144,52 +190,9 @@ async def verify_answer_node(state: MainState) -> Dict[str, Any]:
         logger.info(f"[Verify] 검증 스킵 ({len(agent_answers)}개 저위험 답변 통과)")
         return {"verification_passed": True}
 
-    async def verify_single(answer: dict) -> dict:
-        question = answer.get("question", "")
-        response = await call_llm(
-            [
-                {"role": "system", "content": VERIFY_ANSWER.system},
-                {"role": "user", "content": VERIFY_ANSWER.user.format(
-                    context=answer.get("context", ""),
-                    question=answer.get("question", ""),
-                    answer=answer.get("answer", "")
-                )}
-            ],
-            max_tokens=1024,
-            json_schema=VERIFY_ANSWER_JSON_SCHEMA
-        )
-        try:
-            result = json.loads(strip_markdown_codeblock(response))
-            passed = result.get("passed", True)
-            issues = result.get("issues", [])
-        except json.JSONDecodeError:
-            logger.warning(f"[Verify] JSON 파싱 실패 - 통과 처리: {response[:100]}")
-            passed, issues = True, []
-
-        if not passed:
-            logger.warning(f"[Verify] 검증 실패 | 질문: {question[:50]} | 문제: {issues}")
-        else:
-            logger.info(f"[Verify] 검증 통과 | 질문: {question[:50]}")
-
-        return {"passed": passed, "issues": issues, "question": question}
-
-    results = await asyncio.gather(*[verify_single(a) for a in answers_to_verify])
+    results = await asyncio.gather(*[_verify_single_answer(a) for a in answers_to_verify])
     failed = [r for r in results if not r["passed"]]
-
-    # Langfuse 스코어 기록
-    try:
-        trace_id = langfuse_context.get_current_trace_id()
-        if trace_id:
-            score_value = 0.0 if failed else 1.0
-            comment = "; ".join(i for r in failed for i in r.get("issues", [])) if failed else "검증 통과"
-            langfuse.create_score(
-                trace_id=trace_id,
-                name="hallucination_check",
-                value=score_value,
-                comment=comment,
-            )
-    except Exception as e:
-        logger.debug(f"[Verify] Langfuse score 기록 실패 (무시): {e}")
+    _record_hallucination_score(failed)
 
     if not failed:
         logger.info("[Verify] 전체 답변 검증 통과")

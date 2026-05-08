@@ -19,7 +19,7 @@ from app.services.chat_agent.prompts import (
 from app.services.chat_agent.node_utils import (
     VERIFY_ANSWER_JSON_SCHEMA,
     QuestionTask,
-    VerifyResult,
+    HallucinationResult,
     call_llm,
     generate_single_answer,
 )
@@ -91,7 +91,7 @@ def _record_hallucination_score(failed: list) -> None:
         logger.debug(f"[Verify] Langfuse score 기록 실패 (무시): {e}")
 
 
-async def _verify_single_answer(answer: dict) -> VerifyResult:
+async def _verify_single_answer(answer: dict) -> HallucinationResult:
     """단일 답변 할루시네이션 검증 수행"""
     question = answer.get("question", "")
     response = await call_llm(
@@ -103,7 +103,7 @@ async def _verify_single_answer(answer: dict) -> VerifyResult:
                 answer=answer.get("answer", ""),
             )},
         ],
-        max_tokens=1024,
+        max_tokens=settings.VERIFY_MAX_TOKENS,
         json_schema=VERIFY_ANSWER_JSON_SCHEMA,
     )
     try:
@@ -119,7 +119,7 @@ async def _verify_single_answer(answer: dict) -> VerifyResult:
     else:
         logger.info(f"[Verify] 검증 통과 | 질문: {question[:50]}")
 
-    return VerifyResult(passed=passed, issues=issues, question=question)
+    return HallucinationResult(passed=passed, issues=issues, question=question)
 
 
 # ── process_question ──────────────────────────────────────────────────────────

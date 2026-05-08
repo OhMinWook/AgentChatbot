@@ -45,7 +45,7 @@ class QuestionTask:
 
 
 @dataclass
-class VerifyResult:
+class HallucinationResult:
     """할루시네이션 검증 결과"""
     passed: bool
     issues: List[str]

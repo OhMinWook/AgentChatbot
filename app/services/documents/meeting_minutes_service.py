@@ -2,7 +2,12 @@
 
 import json
 import logging
-from typing import Any, Dict, List
+import os
+import re
+import tempfile
+import zipfile
+from typing import Any, Dict, List, Optional
+from xml.etree import ElementTree as ET
 
 from app.services.api_clients.llm_utils import call_llm, strip_markdown_codeblock
 from app.services.documents.meeting_minutes_prompts import MEETING_MINUTES_EXTRACTOR
@@ -96,6 +101,87 @@ class MeetingMinutesService:
             "meeting_content_lines": content_lines,
             "meeting_result_lines": result_lines,
         }
+
+
+    async def extract_file_text(self, uploaded_bytes: bytes, uploaded_suffix: str, uploaded_filename: str) -> str:
+        """파일 바이트에서 텍스트 추출 (HWPX 직접 파싱 → Polaris/PDF/MarkItDown 폴백)"""
+        from app.services.rag.extractors import file_text_extractor
+        from app.services.rag.rag_ingestion_service import detect_file_type
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded_suffix) as tmp:
+                tmp.write(uploaded_bytes)
+                tmp_path = tmp.name
+
+            if uploaded_suffix.lower() == ".hwpx":
+                text = self._extract_hwpx_text(tmp_path)
+                if text:
+                    return text
+
+            file_type = detect_file_type(uploaded_filename)
+            try:
+                page_results, md_content = await file_text_extractor.extract_text(tmp_path, file_type)
+            except Exception as ex:
+                logger.warning(f"[MeetingMinutes] extractor failed, fallback empty: {ex}")
+                return ""
+
+            if md_content:
+                return md_content
+            elif page_results:
+                return "\n".join(text for _, text in page_results)
+            return ""
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _extract_hwpx_text(file_path: str) -> Optional[str]:
+        """HWPX(ZIP+XML) 파일에서 텍스트를 직접 추출 (한컴 오피스/win32com 불필요).
+
+        1순위: Preview/PrvText.txt (문서 전체 평문, 표/헤더 포함)
+        2순위: Contents/section*.xml의 <hp:t> 텍스트 노드
+        """
+        try:
+            with zipfile.ZipFile(file_path, "r") as zf:
+                names = zf.namelist()
+                if "Preview/PrvText.txt" in names:
+                    raw = zf.read("Preview/PrvText.txt")
+                    for enc in ("utf-8", "utf-16", "utf-16-le", "cp949"):
+                        try:
+                            text = raw.decode(enc).strip()
+                        except UnicodeDecodeError:
+                            continue
+                        if text:
+                            return text
+
+                texts: list[str] = []
+                section_names = sorted(
+                    n for n in names
+                    if n.startswith("Contents/section") and n.endswith(".xml")
+                )
+                for name in section_names:
+                    try:
+                        raw = zf.read(name)
+                        root = ET.fromstring(raw)
+                    except (KeyError, ET.ParseError):
+                        continue
+                    for elem in root.iter():
+                        tag = elem.tag.split("}", 1)[-1]
+                        if tag in ("t", "char") and elem.text:
+                            texts.append(elem.text)
+                    texts.append("\n")
+
+            joined = "".join(texts)
+            joined = re.sub(r"[ \t]+", " ", joined)
+            joined = re.sub(r"\n{3,}", "\n\n", joined).strip()
+            return joined or None
+        except Exception as e:
+            logger.error(f"[MeetingMinutes] HWPX direct parse failed: {e}")
+            return None
 
 
 meeting_minutes_service = MeetingMinutesService()

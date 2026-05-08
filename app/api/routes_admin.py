@@ -17,7 +17,11 @@ from app.api.schemas.admin_schemas import (
     DocumentListResponse,
     DocumentCountResponse,
 )
-from app.services.admin.admin_document_service import admin_document_service
+from app.services.admin.admin_document_service import (
+    admin_document_service,
+    AdminDocumentInput,
+    DocumentSearchQuery,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +57,14 @@ async def add_document(
         file_name = file.filename or "unknown"
 
         success = await admin_document_service.add_document(
-            key=key,
-            admin_id=adminId,
-            admin_name=adminName,
-            file_path=temp_file.name,
-            file_name=file_name,
-            file_size=file_size,
+            AdminDocumentInput(
+                key=key,
+                admin_id=adminId,
+                admin_name=adminName,
+                file_path=temp_file.name,
+                file_name=file_name,
+                file_size=file_size,
+            )
         )
 
         if not success:
@@ -184,12 +190,14 @@ async def search_documents(
     """
     try:
         docs, total_count = await admin_document_service.search_documents(
-            search_type=searchType,
-            search_term=searchTerm,
-            page=page,
-            size=size,
-            order_type=orderType,
-            order=order,
+            DocumentSearchQuery(
+                search_type=searchType,
+                search_term=searchTerm,
+                page=page,
+                size=size,
+                order_type=orderType,
+                order=order,
+            )
         )
 
         items = [

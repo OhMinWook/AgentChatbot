@@ -11,6 +11,7 @@ import os
 import shutil
 import tempfile
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple, Any
 
@@ -26,6 +27,26 @@ from app.services.rag.sparse_encoder import sparse_encoder
 from app.services.rag.text_utils import add_source_prefix
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AdminDocumentInput:
+    key: str
+    admin_id: str
+    admin_name: str
+    file_path: str
+    file_name: str
+    file_size: int
+
+
+@dataclass
+class DocumentSearchQuery:
+    search_type: str
+    search_term: str
+    page: int = 1
+    size: int = 10
+    order_type: str = "registDate"
+    order: str = "desc"
 
 
 class AdminDocumentService:
@@ -76,25 +97,9 @@ class AdminDocumentService:
         except UnexpectedResponse:
             pass
 
-    async def add_document(
-        self,
-        key: str,
-        admin_id: str,
-        admin_name: str,
-        file_path: str,
-        file_name: str,
-        file_size: int,
-    ) -> bool:
+    async def add_document(self, inp: AdminDocumentInput) -> bool:
         """
         문서 등록 (청킹 + 임베딩 + Qdrant 저장)
-
-        Args:
-            key: 문서 고유 키
-            admin_id: 관리자 ID
-            admin_name: 관리자 이름
-            file_path: 업로드된 파일 경로
-            file_name: 원본 파일명
-            file_size: 파일 크기 (bytes)
 
         Returns:
             성공 여부
@@ -102,25 +107,25 @@ class AdminDocumentService:
         await self.ensure_collection()
 
         # 중복 key면 기존 삭제 후 덮어쓰기
-        exists = await self._check_key_exists(key)
+        exists = await self._check_key_exists(inp.key)
         if exists:
-            logger.info(f"[AdminDocument] Duplicate key, overwriting: {key}")
-            await self.delete_document(key)
+            logger.info(f"[AdminDocument] Duplicate key, overwriting: {inp.key}")
+            await self.delete_document(inp.key)
 
         # 파일 저장 경로: uploaded_files/admin/{hash}/ (경로 길이 제한 방지)
-        key_hash = hashlib.md5(key.encode()).hexdigest()[:16]
+        key_hash = hashlib.md5(inp.key.encode()).hexdigest()[:16]
         admin_upload_dir = os.path.join(settings.UPLOAD_DIR, "admin", key_hash)
         os.makedirs(admin_upload_dir, exist_ok=True)
 
         # 파일 복사
-        dest_file_path = os.path.join(admin_upload_dir, file_name)
-        shutil.copy(file_path, dest_file_path)
+        dest_file_path = os.path.join(admin_upload_dir, inp.file_name)
+        shutil.copy(inp.file_path, dest_file_path)
 
         # 청킹 수행 (rag_ingestion_service의 청킹 로직 재사용)
-        chunks = await self._extract_chunks(dest_file_path, file_name)
+        chunks = await self._extract_chunks(dest_file_path, inp.file_name)
 
         if not chunks:
-            logger.error(f"[AdminDocument] No chunks extracted: {file_name}")
+            logger.error(f"[AdminDocument] No chunks extracted: {inp.file_name}")
             # 실패 시 파일 삭제
             shutil.rmtree(admin_upload_dir, ignore_errors=True)
             return False
@@ -164,10 +169,10 @@ class AdminDocumentService:
                 "prev_chunk_id": chunk.get("metadata", {}).get("prev_chunk_id"),
                 "next_chunk_id": chunk.get("metadata", {}).get("next_chunk_id"),
                 # 관리자 확장 필드
-                "key": key,
-                "admin_id": admin_id,
-                "admin_name": admin_name,
-                "file_size": file_size,
+                "key": inp.key,
+                "admin_id": inp.admin_id,
+                "admin_name": inp.admin_name,
+                "file_size": inp.file_size,
                 "regist_date": regist_date,
                 "is_use": True,
             }
@@ -415,25 +420,9 @@ class AdminDocumentService:
             logger.error(f"[AdminDocument] Get all documents failed: {e}")
             return []
 
-    async def search_documents(
-        self,
-        search_type: str,
-        search_term: str,
-        page: int = 1,
-        size: int = 10,
-        order_type: str = "registDate",
-        order: str = "desc",
-    ) -> Tuple[List[Dict], int]:
+    async def search_documents(self, query: DocumentSearchQuery) -> Tuple[List[Dict], int]:
         """
         문서 검색
-
-        Args:
-            search_type: 검색 유형 (fileName, adminId, adminName)
-            search_term: 검색어
-            page: 페이지 번호
-            size: 페이지 크기
-            order_type: 정렬 기준 (fileName, registDate)
-            order: 정렬 방향 (asc, desc)
 
         Returns:
             (검색 결과, 총 개수)
@@ -442,14 +431,14 @@ class AdminDocumentService:
             all_docs = await self._get_all_documents()
 
             # 필터링
-            if search_term:
-                search_term_lower = search_term.lower()
+            if query.search_term:
+                search_term_lower = query.search_term.lower()
                 field_map = {
                     "fileName": "file_name",
                     "adminId": "admin_id",
                     "adminName": "admin_name",
                 }
-                field = field_map.get(search_type, "file_name")
+                field = field_map.get(query.search_type, "file_name")
 
                 all_docs = [
                     doc for doc in all_docs
@@ -463,12 +452,12 @@ class AdminDocumentService:
                 "fileName": "file_name",
                 "registDate": "regist_date",
             }
-            sort_key = sort_field_map.get(order_type, "regist_date")
-            is_descending = (order == "desc")
+            sort_key = sort_field_map.get(query.order_type, "regist_date")
+            is_descending = (query.order == "desc")
             all_docs.sort(key=lambda x: x.get(sort_key, ""), reverse=is_descending)
 
-            start_idx = (page - 1) * size
-            end_idx = start_idx + size
+            start_idx = (query.page - 1) * query.size
+            end_idx = start_idx + query.size
             paged_docs = all_docs[start_idx:end_idx]
 
             for i, doc in enumerate(paged_docs):

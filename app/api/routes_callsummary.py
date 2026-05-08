@@ -150,7 +150,7 @@ async def summarize_call(
         task = asyncio.create_task(run())
 
         while True:
-            item = await queue.get()
+            item = await asyncio.wait_for(queue.get(), timeout=settings.SSE_QUEUE_TIMEOUT)
             if item is None:
                 break
             yield item

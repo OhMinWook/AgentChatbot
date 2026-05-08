@@ -1,12 +1,8 @@
 import json
 import logging
 import os
-import re
-import tempfile
-import zipfile
 from typing import Optional
 from urllib.parse import quote
-from xml.etree import ElementTree as ET
 
 from fastapi import APIRouter, HTTPException, Form, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -15,57 +11,7 @@ logger = logging.getLogger(__name__)
 
 from app.services.documents.document_automater_service import document_automater_service
 from app.services.documents.meeting_minutes_service import meeting_minutes_service
-from app.core.config import settings
-from app.services.rag.extractors import file_text_extractor
-from app.services.rag.rag_ingestion_service import detect_file_type
 from app.services.utils.download_service import download_service
-
-
-def _extract_hwpx_text(file_path: str) -> Optional[str]:
-    """HWPX(ZIP+XML) 파일에서 텍스트를 직접 추출 (한컴 오피스/win32com 불필요).
-
-    1순위: Preview/PrvText.txt (문서 전체 평문, 표/헤더 포함)
-    2순위: Contents/section*.xml의 <hp:t> 텍스트 노드
-    """
-    try:
-        with zipfile.ZipFile(file_path, "r") as zf:
-            names = zf.namelist()
-
-            if "Preview/PrvText.txt" in names:
-                raw = zf.read("Preview/PrvText.txt")
-                for enc in ("utf-8", "utf-16", "utf-16-le", "cp949"):
-                    try:
-                        text = raw.decode(enc)
-                    except UnicodeDecodeError:
-                        continue
-                    text = text.strip()
-                    if text:
-                        return text
-
-            texts: list[str] = []
-            section_names = sorted(
-                n for n in names
-                if n.startswith("Contents/section") and n.endswith(".xml")
-            )
-            for name in section_names:
-                try:
-                    raw = zf.read(name)
-                    root = ET.fromstring(raw)
-                except (KeyError, ET.ParseError):
-                    continue
-                for elem in root.iter():
-                    tag = elem.tag.split("}", 1)[-1]
-                    if tag in ("t", "char") and elem.text:
-                        texts.append(elem.text)
-                texts.append("\n")
-
-        joined = "".join(texts)
-        joined = re.sub(r"[ \t]+", " ", joined)
-        joined = re.sub(r"\n{3,}", "\n\n", joined).strip()
-        return joined or None
-    except Exception as e:
-        logger.error(f"[MeetingMinutes] HWPX direct parse failed: {e}")
-        return None
 
 
 router = APIRouter()
@@ -238,7 +184,6 @@ async def generate_meeting_minutes_from_text(
                 payload["data"] = data
             return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-        tmp_path = None
         try:
             yield _event("start", 0, "요청 수신")
 
@@ -247,24 +192,9 @@ async def generate_meeting_minutes_from_text(
             if uploaded_bytes:
                 yield _event("extract", 5, "파일 텍스트 추출 시작")
                 try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded_suffix) as tmp:
-                        tmp.write(uploaded_bytes)
-                        tmp_path = tmp.name
-
-                    ext_lower = uploaded_suffix.lower()
-                    if ext_lower == ".hwpx":
-                        file_text = _extract_hwpx_text(tmp_path) or ""
-                    if not file_text:
-                        file_type = detect_file_type(uploaded_filename or "")
-                        try:
-                            page_results, md_content = await file_text_extractor.extract_text(tmp_path, file_type)
-                        except Exception as ex_inner:
-                            logger.warning(f"[MeetingMinutes] extractor failed, fallback empty: {ex_inner}")
-                            page_results, md_content = None, None
-                        if md_content:
-                            file_text = md_content
-                        elif page_results:
-                            file_text = "\n".join(text for _, text in page_results)
+                    file_text = await meeting_minutes_service.extract_file_text(
+                        uploaded_bytes, uploaded_suffix, uploaded_filename or ""
+                    )
                 except Exception as e:
                     logger.exception(f"[MeetingMinutes] file extraction error: {e}")
                     yield _event("error", 0, f"파일에서 텍스트를 추출하지 못했습니다: {e}")
@@ -342,12 +272,9 @@ async def generate_meeting_minutes_from_text(
                     "extracted": context_data,
                 },
             )
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+        except Exception as e:
+            logger.exception(f"[MeetingMinutes] Unexpected error: {e}")
+            yield _event("error", 0, f"서버 내부 오류: {e}")
 
     return StreamingResponse(
         event_stream(),

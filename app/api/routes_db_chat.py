@@ -32,7 +32,7 @@ async def send_db_message(
         if not guard.allowed:
             raise HTTPException(status_code=400, detail=guard.reason)
 
-        # TODO: DBTool 구현 후 실제 DB 조회로 교체
+        # NOTE: DBTool 미구현 — 실제 DB 조회 없이 빈 결과로 동작
         db_results = []
 
         generator = db_sse_adapter.invoke_with_sse(

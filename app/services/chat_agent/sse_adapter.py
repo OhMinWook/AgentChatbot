@@ -263,6 +263,47 @@ class SSEGraphAdapter:
             if token:
                 yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": token})
 
+    async def _emit_cached_answer(
+        self, cached: dict, user_query: str, translate_to: Optional[str], invoke_id: str
+    ) -> AsyncGenerator[bytes, None]:
+        """캐시 히트 시 저장된 답변/번역을 SSE로 emit."""
+        if cached.get("references"):
+            yield self._format_sse({"type": SSEType.REFERENCES, "docs": cached["references"]})
+        content = cached.get("answer", "")
+        try:
+            langfuse_context.update_current_observation(
+                input=user_query,
+                output=content,
+                metadata={"cache_hit": True},
+            )
+        except Exception:
+            pass
+        for i in range(0, len(content), settings.SSE_CHUNK_SIZE):
+            yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + settings.SSE_CHUNK_SIZE]})
+        if translate_to:
+            cached_translation = cached.get("translations", {}).get(translate_to)
+            if cached_translation:
+                for i in range(0, len(cached_translation), settings.SSE_CHUNK_SIZE):
+                    yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": cached_translation[i:i + settings.SSE_CHUNK_SIZE]})
+            else:
+                translation_buffer = []
+                async for chunk in self._stream_translation(content, translate_to):
+                    data = json.loads(chunk.decode("utf-8").removeprefix("data: ").strip())
+                    if data.get("type") == SSEType.TRANSLATION:
+                        translation_buffer.append(data.get("content", ""))
+                    yield chunk
+                full_translation = "".join(translation_buffer)
+                if full_translation:
+                    await answer_cache_service.add_translation(invoke_id, user_query, translate_to, full_translation)
+        yield self._format_sse({"type": SSEType.DONE})
+
+    async def _run_graph(self, initial_state: dict, config: dict) -> Optional[dict]:
+        """그래프를 실행하고 최종 상태를 반환한다."""
+        final_state = None
+        async for event in self.graph.astream(initial_state, config, stream_mode="values"):
+            final_state = event
+        return final_state
+
     # ------------------------------------------------------------------
     # invoke_with_sse
     # ------------------------------------------------------------------
@@ -297,42 +338,13 @@ class SSEGraphAdapter:
             is_open = filter_filename is None
             cached = await answer_cache_service.get(invoke_id, user_query) if is_open else None
             if cached:
-                if cached.get("references"):
-                    yield self._format_sse({"type": SSEType.REFERENCES, "docs": cached["references"]})
-                content = cached.get("answer", "")
-                try:
-                    langfuse_context.update_current_observation(
-                        input=user_query,
-                        output=content,
-                        metadata={"cache_hit": True},
-                    )
-                except Exception:
-                    pass
-                for i in range(0, len(content), settings.SSE_CHUNK_SIZE):
-                    yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + settings.SSE_CHUNK_SIZE]})
-                if translate_to:
-                    cached_translation = cached.get("translations", {}).get(translate_to)
-                    if cached_translation:
-                        for i in range(0, len(cached_translation), settings.SSE_CHUNK_SIZE):
-                            yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": cached_translation[i:i + settings.SSE_CHUNK_SIZE]})
-                    else:
-                        translation_buffer = []
-                        async for chunk in self._stream_translation(content, translate_to):
-                            data = json.loads(chunk.decode("utf-8").removeprefix("data: ").strip())
-                            if data.get("type") == SSEType.TRANSLATION:
-                                translation_buffer.append(data.get("content", ""))
-                            yield chunk
-                        full_translation = "".join(translation_buffer)
-                        if full_translation:
-                            await answer_cache_service.add_translation(invoke_id, user_query, translate_to, full_translation)
-                yield self._format_sse({"type": SSEType.DONE})
+                async for chunk in self._emit_cached_answer(cached, user_query, translate_to, invoke_id):
+                    yield chunk
                 return
 
             yield self._format_sse({"type": SSEType.PROGRESS, "step": "답변을 준비하고 있습니다"})
 
-            final_state = None
-            async for event in self.graph.astream(initial_state, config, stream_mode="values"):
-                final_state = event
+            final_state = await self._run_graph(initial_state, config)
 
             if final_state:
                 answer_buffer = []

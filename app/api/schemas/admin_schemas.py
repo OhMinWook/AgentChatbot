@@ -2,8 +2,17 @@
 관리자 문서 관리 API 스키마
 """
 
+from enum import Enum
 from typing import List, Optional
 from pydantic import BaseModel
+
+
+class ErrorCode(str, Enum):
+    """관리자 API 공통 에러코드"""
+    SUCCESS = "0000"
+    BAD_REQUEST = "4000"
+    NOT_FOUND = "4004"
+    SERVER_ERROR = "5000"
 
 
 class AdminBaseResponse(BaseModel):

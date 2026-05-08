@@ -16,6 +16,7 @@ from app.api.schemas.admin_schemas import (
     DocumentItem,
     DocumentListResponse,
     DocumentCountResponse,
+    ErrorCode,
 )
 from app.services.admin.admin_document_service import (
     admin_document_service,
@@ -31,7 +32,7 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
 def _server_error(ResponseClass, e: Exception, label: str):
     """예외를 로그에 기록하고 code=5000 응답 반환"""
     logger.exception(f"[Admin] {label}: {e}")
-    return ResponseClass(code="5000", message=f"서버 오류: {str(e)}")
+    return ResponseClass(code=ErrorCode.SERVER_ERROR, message=f"서버 오류: {str(e)}")
 
 
 def _build_document_items(docs: list) -> list:
@@ -91,12 +92,12 @@ async def add_document(
 
         if not success:
             return AdminBaseResponse(
-                code="4000",
+                code=ErrorCode.BAD_REQUEST,
                 message="문서 등록 실패 (중복 키 또는 파싱 실패)",
             )
 
         return AdminBaseResponse(
-            code="0000",
+            code=ErrorCode.SUCCESS,
             message="문서가 성공적으로 등록되었습니다.",
         )
 
@@ -120,12 +121,12 @@ async def delete_document(key: str):
 
         if not success:
             return AdminBaseResponse(
-                code="4004",
+                code=ErrorCode.NOT_FOUND,
                 message="문서를 찾을 수 없거나 삭제에 실패했습니다.",
             )
 
         return AdminBaseResponse(
-            code="0000",
+            code=ErrorCode.SUCCESS,
             message="문서가 성공적으로 삭제되었습니다.",
         )
 
@@ -157,7 +158,7 @@ async def get_documents(
         items = _build_document_items(docs)
 
         return DocumentListResponse(
-            code="0000",
+            code=ErrorCode.SUCCESS,
             message="success",
             totalCount=total_count,
             page=page,
@@ -201,7 +202,7 @@ async def search_documents(
         items = _build_document_items(docs)
 
         return DocumentListResponse(
-            code="0000",
+            code=ErrorCode.SUCCESS,
             message="success",
             totalCount=total_count,
             page=page,
@@ -226,13 +227,13 @@ async def toggle_document_usage(key: str):
 
         if new_value is None:
             return AdminBaseResponse(
-                code="4004",
+                code=ErrorCode.NOT_FOUND,
                 message="문서를 찾을 수 없습니다.",
             )
 
         status_text = "사용" if new_value else "미사용"
         return AdminBaseResponse(
-            code="0000",
+            code=ErrorCode.SUCCESS,
             message=f"문서 상태가 '{status_text}'으로 변경되었습니다.",
         )
 
@@ -254,7 +255,7 @@ async def get_document_count():
         stats = await admin_document_service.get_statistics()
 
         return DocumentCountResponse(
-            code="0000",
+            code=ErrorCode.SUCCESS,
             message="success",
             totalCount=stats.get("totalCount", 0),
             useCount=stats.get("useCount", 0),

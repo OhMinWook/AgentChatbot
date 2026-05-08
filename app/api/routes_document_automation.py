@@ -5,7 +5,7 @@ from typing import Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Form, UploadFile, File
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
@@ -13,9 +13,18 @@ from app.core.config import settings
 from app.services.documents.document_automater_service import document_automater_service
 from app.services.documents.meeting_minutes_service import meeting_minutes_service
 from app.services.utils.download_service import download_service
+from app.services.utils.sse_utils import create_sse_response
 
 
 router = APIRouter()
+
+
+def _event(stage: str, percent: int, message: str = "", data: Optional[dict] = None) -> str:
+    """문서 자동화 SSE 이벤트 생성 헬퍼"""
+    payload = {"stage": stage, "percent": percent, "message": message}
+    if data is not None:
+        payload["data"] = data
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 @router.post("/documents/generate-hwpx", summary="HWPX 문서 자동 생성")
 async def generate_hwpx_document_api(
@@ -179,12 +188,6 @@ async def generate_meeting_minutes_from_text(
         raise HTTPException(status_code=400, detail="raw_text 또는 file 중 하나는 반드시 제공되어야 합니다.")
 
     async def event_stream():
-        def _event(stage: str, percent: int, message: str = "", data: Optional[dict] = None) -> str:
-            payload = {"stage": stage, "percent": percent, "message": message}
-            if data is not None:
-                payload["data"] = data
-            return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
         try:
             yield _event("start", 0, "요청 수신")
 
@@ -277,15 +280,7 @@ async def generate_meeting_minutes_from_text(
             logger.exception(f"[MeetingMinutes] Unexpected error: {e}")
             yield _event("error", 0, f"서버 내부 오류: {e}")
 
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+    return create_sse_response(event_stream())
 
 
 @router.get("/documents/download/{token}", summary="토큰 기반 파일 다운로드")

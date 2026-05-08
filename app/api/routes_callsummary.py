@@ -65,6 +65,54 @@ def _progress(percent: int, stage: SummaryStage, message: str) -> str:
     })
 
 
+class CallSummaryService:
+    """오디오 파일 처리 서비스 (저장 → 전처리 → STT → 요약)"""
+
+    async def process(self, audio: UploadFile, invoke_id: str, on_progress=None) -> dict:
+        """오디오 파일을 처리하고 {transcript, summary, duration_seconds}를 반환한다."""
+        start_time = time.time()
+
+        async def _emit(percent, stage, message):
+            if on_progress:
+                await on_progress(percent, stage, message)
+
+        await _emit(0, SummaryStage.RECEIVING, "오디오 파일 수신 중...")
+        saved_path, _ = await save_upload_file(
+            audio, "call_summary", invoke_id, default_filename="audio.wav"
+        )
+        await _emit(10, SummaryStage.RECEIVING, f"파일 저장 완료: {audio.filename or 'audio.wav'}")
+        await _emit(15, SummaryStage.STT_START, "음성을 분석하고 있습니다")
+
+        filename = audio.filename or "audio.wav"
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "wav"
+        audio_bytes = await asyncio.to_thread(lambda: open(saved_path, "rb").read())
+
+        try:
+            audio_bytes = await preprocess_audio_ffmpeg(audio_bytes, ext)
+        except Exception as e:
+            logger.warning(f"ffmpeg 전처리 실패, 원본 사용: {e}")
+
+        await _emit(25, SummaryStage.STT_PROCESSING, "음성을 텍스트로 변환 중...")
+        transcript = await stt_client.transcribe_bytes(audio_bytes, filename)
+        if not transcript:
+            raise ValueError("STT 결과가 비어있습니다. 오디오 파일을 확인해주세요.")
+
+        await _emit(50, SummaryStage.STT_COMPLETE, "음성 인식 완료")
+        await _emit(55, SummaryStage.SUMMARY_START, "요약을 생성하고 있습니다")
+        summary = await _summarize_transcript(transcript, on_progress=on_progress)
+        await _emit(95, SummaryStage.SUMMARY_PROCESSING, "요약 생성 완료, 결과 정리 중...")
+        await _emit(100, SummaryStage.COMPLETE, "처리 완료")
+
+        return {
+            "transcript": transcript,
+            "summary": summary,
+            "duration_seconds": round(time.time() - start_time, 2),
+        }
+
+
+call_summary_service = CallSummaryService()
+
+
 @router.post("/call-summary/{invoke_id}", summary="통화 요약 (SSE 실시간 진행률)")
 async def summarize_call(
     invoke_id: str,
@@ -78,77 +126,28 @@ async def summarize_call(
     - **audio**: 업로드할 오디오 파일
     """
 
-    # SSE 스트리밍 인프라만 담당
     async def event_stream() -> AsyncGenerator[str, None]:
-        start_time = time.time()
-        # event_stream은 asyncio.Queue 패턴으로 전환 → SSE 스트리밍만 담당
         queue = asyncio.Queue()
-        result_holder = {"transcript": None, "summary": None, "error": None}
 
         async def on_progress(percent, stage, message):
             await queue.put(_progress(percent, stage, message))
 
         async def run():
             try:
-                # ========== 1. 파일 수신 및 저장 (0%) ==========
-                await on_progress(0, SummaryStage.RECEIVING, "오디오 파일 수신 중...")
-
-                saved_path, _ = await save_upload_file(
-                    audio, "call_summary", invoke_id,
-                    default_filename="audio.wav"
-                )
-
-                await on_progress(10, SummaryStage.RECEIVING, f"파일 저장 완료: {audio.filename or 'audio.wav'}")
-
-                # ========== 2. STT 처리 (10% → 50%) ==========
-                await on_progress(15, SummaryStage.STT_START, "음성을 분석하고 있습니다")
-
-                filename = audio.filename or "audio.wav"
-                ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "wav"
-                audio_bytes = await asyncio.to_thread(lambda: open(saved_path, "rb").read())
-
-                try:
-                    audio_bytes = await preprocess_audio_ffmpeg(audio_bytes, ext)
-                except Exception as e:
-                    logger.warning(f"ffmpeg 전처리 실패, 원본 사용: {e}")
-
-                await on_progress(25, SummaryStage.STT_PROCESSING, "음성을 텍스트로 변환 중...")
-
-                transcript = await stt_client.transcribe_bytes(audio_bytes, filename)
-                if not transcript:
-                    raise ValueError("STT 결과가 비어있습니다. 오디오 파일을 확인해주세요.")
-
-                result_holder["transcript"] = transcript
-                await on_progress(50, SummaryStage.STT_COMPLETE, "음성 인식 완료")
-
-                # ========== 3. LLM 요약 (50% → 95%) ==========
-                await on_progress(55, SummaryStage.SUMMARY_START, "요약을 생성하고 있습니다")
-
-                summary = await _summarize_transcript(transcript, on_progress=on_progress)
-                result_holder["summary"] = summary
-
-                await on_progress(95, SummaryStage.SUMMARY_PROCESSING, "요약 생성 완료, 결과 정리 중...")
-
-                # ========== 4. 완료 (100%) ==========
-                await on_progress(100, SummaryStage.COMPLETE, "처리 완료")
-
-                duration = time.time() - start_time
+                result = await call_summary_service.process(audio, invoke_id, on_progress=on_progress)
                 await queue.put(create_sse_data({
                     "type": SSEType.RESULT,
-                    "transcript": transcript,
-                    "summary": summary,
-                    "duration_seconds": round(duration, 2)
+                    "transcript": result["transcript"],
+                    "summary": result["summary"],
+                    "duration_seconds": result["duration_seconds"],
                 }))
-
             except Exception as e:
-                result_holder["error"] = str(e)
                 await queue.put(_progress(-1, SummaryStage.ERROR, str(e)))
                 await queue.put(create_sse_data({"type": SSEType.ERROR, "detail": str(e)}))
             finally:
                 await queue.put(None)
 
         task = asyncio.create_task(run())
-
         async for item in sse_queue_consume(queue, task, settings.SSE_QUEUE_TIMEOUT):
             yield item
 
@@ -164,38 +163,10 @@ async def summarize_call_sync(
     SSE 없이 단순 JSON 응답을 반환하는 동기 방식 엔드포인트.
     진행률이 필요 없는 경우 사용.
     """
-    start_time = time.time()
-
     try:
-        saved_path, _ = await save_upload_file(
-            audio, "call_summary", invoke_id,
-            default_filename="audio.wav"
-        )
-
-        filename = audio.filename or "audio.wav"
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "wav"
-        audio_bytes = await asyncio.to_thread(lambda: open(saved_path, "rb").read())
-
-        try:
-            audio_bytes = await preprocess_audio_ffmpeg(audio_bytes, ext)
-        except Exception as e:
-            logger.warning(f"ffmpeg 전처리 실패, 원본 사용: {e}")
-
-        transcript = await stt_client.transcribe_bytes(audio_bytes, filename)
-        if not transcript:
-            raise HTTPException(status_code=400, detail="STT 결과가 비어있습니다.")
-
-        summary = await _summarize_transcript(transcript)
-
-        duration = time.time() - start_time
-        return {
-            "transcript": transcript,
-            "summary": summary,
-            "duration_seconds": round(duration, 2)
-        }
-
-    except HTTPException:
-        raise
+        return await call_summary_service.process(audio, invoke_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

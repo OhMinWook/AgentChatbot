@@ -25,6 +25,53 @@ logger = logging.getLogger(__name__)
 
 # precomputed 답변을 작은 청크로 나눌 때 사용할 크기 (settings.SSE_CHUNK_SIZE)
 
+class TranslationSplitter:
+    """[TRANSLATION] 구분자 기준으로 ANSWER/TRANSLATION 토큰 스트림을 분리하는 상태 머신"""
+    DELIMITER = "[TRANSLATION]"
+    _D_LEN = len(DELIMITER)
+
+    def __init__(self, translate_to: Optional[str]):
+        self.translate_to = translate_to
+        self._accumulated = ""
+        self._in_translation = False
+
+    def feed(self, token: str) -> list[tuple[str, str]]:
+        """토큰 입력 → [('answer'|'translation', content)] 반환"""
+        self._accumulated += re.sub(r"\*+", "", token)
+        results = []
+
+        if not self._in_translation:
+            idx = self._accumulated.find(self.DELIMITER)
+            if idx != -1:
+                before = self._accumulated[:idx].rstrip("\n")
+                after = self._accumulated[idx + self._D_LEN:].lstrip("\n")
+                if before:
+                    results.append(("answer", before))
+                self._in_translation = True
+                self._accumulated = after
+                if self._accumulated and self.translate_to:
+                    results.append(("translation", self._accumulated))
+                self._accumulated = ""
+            else:
+                safe_len = max(0, len(self._accumulated) - self._D_LEN)
+                if safe_len > 0:
+                    results.append(("answer", self._accumulated[:safe_len]))
+                    self._accumulated = self._accumulated[safe_len:]
+        else:
+            if self.translate_to and self._accumulated:
+                results.append(("translation", self._accumulated))
+            self._accumulated = ""
+
+        return results
+
+    def flush(self) -> list[tuple[str, str]]:
+        """남은 버퍼 출력"""
+        if self._accumulated:
+            kind = "translation" if self._in_translation and self.translate_to else "answer"
+            return [(kind, self._accumulated)]
+        return []
+
+
 # pending_threads TTL (초)
 class SSEGraphAdapter:
     """LangGraph와 SSE 스트리밍을 연결하는 어댑터"""
@@ -64,43 +111,21 @@ class SSEGraphAdapter:
         self, messages: list, max_tokens: int, translate_to: Optional[str]
     ) -> AsyncGenerator[bytes, None]:
         """LLM 스트리밍으로 토큰 단위 전송. [TRANSLATION] 구분자 기준으로 ANSWER/TRANSLATION 이벤트 분리."""
-        DELIMITER = "[TRANSLATION]"
-        D_LEN = len(DELIMITER)
-        accumulated = ""
-        in_translation = False
-
+        splitter = TranslationSplitter(translate_to)
         async for token in stream_llm_tokens(messages, max_tokens):
             if token:
-                token = re.sub(r"\*+", "", token)
-                accumulated += token
-
-                if not in_translation:
-                    idx = accumulated.find(DELIMITER)
-                    if idx != -1:
-                        before = accumulated[:idx].rstrip("\n")
-                        after = accumulated[idx + D_LEN:].lstrip("\n")
-                        if before:
-                            yield self._format_sse({"type": SSEType.ANSWER, "content": before})
-                        in_translation = True
-                        accumulated = after
-                        if accumulated and translate_to:
-                            yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
-                        accumulated = ""
-                    else:
-                        safe_len = max(0, len(accumulated) - D_LEN)
-                        if safe_len > 0:
-                            yield self._format_sse({"type": SSEType.ANSWER, "content": accumulated[:safe_len]})
-                            accumulated = accumulated[safe_len:]
-                else:
-                    if translate_to and accumulated:
-                        yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
-                    accumulated = ""
-
-        if accumulated:
-            if in_translation and translate_to:
-                yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": accumulated})
-            else:
-                yield self._format_sse({"type": SSEType.ANSWER, "content": accumulated})
+                for kind, content in splitter.feed(token):
+                    sse_type = SSEType.TRANSLATION if kind == "translation" else SSEType.ANSWER
+                    data = {"type": sse_type, "content": content}
+                    if kind == "translation":
+                        data["lang"] = translate_to
+                    yield self._format_sse(data)
+        for kind, content in splitter.flush():
+            sse_type = SSEType.TRANSLATION if kind == "translation" else SSEType.ANSWER
+            data = {"type": sse_type, "content": content}
+            if kind == "translation":
+                data["lang"] = translate_to
+            yield self._format_sse(data)
 
     async def _stream_answer_tokens(
         self, streaming_payload: dict, t_start: float = None

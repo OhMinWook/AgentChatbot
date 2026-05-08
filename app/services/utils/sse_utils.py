@@ -1,4 +1,5 @@
 """SSE (Server-Sent Events) 관련 공통 유틸리티"""
+import asyncio
 import json
 import logging
 from enum import Enum
@@ -95,6 +96,29 @@ async def stream_and_collect_answer(
     if full_answer:
         await memory_service.add_history(invoke_id, user_message, full_answer)
         logger.info(f"[{log_label} Saved] invokeId: {invoke_id}")
+
+
+async def sse_queue_consume(
+    queue: asyncio.Queue,
+    task: asyncio.Task,
+    timeout: float,
+) -> AsyncGenerator[str, None]:
+    """asyncio.Queue 소비 + 타임아웃 처리 공통 헬퍼.
+
+    background task는 queue에 SSE 데이터를 put하고, 완료 시 None을 put한다.
+    타임아웃 발생 시 ERROR 이벤트를 yield하고 task를 취소한다.
+    """
+    while True:
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            yield create_sse_data({"type": SSEType.ERROR, "detail": "처리 시간이 초과되었습니다."})
+            task.cancel()
+            return
+        if item is None:
+            break
+        yield item
+    await task
 
 
 def create_sse_response(generator, headers: Dict[str, str] = None) -> StreamingResponse:

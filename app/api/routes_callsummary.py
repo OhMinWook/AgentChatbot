@@ -11,7 +11,7 @@ from app.core.config import settings
 from app.services.api_clients.stt_client import stt_client
 from app.services.api_clients.llm_client import llm_client
 from app.services.prompt_builders.callsummary_prompt_builder import callsummary_prompt_builder
-from app.services.utils.sse_utils import create_sse_data, create_sse_response, SSEType
+from app.services.utils.sse_utils import create_sse_data, create_sse_response, SSEType, sse_queue_consume
 from app.services.utils.file_utils import save_upload_file
 
 logger = logging.getLogger(__name__)
@@ -149,13 +149,8 @@ async def summarize_call(
 
         task = asyncio.create_task(run())
 
-        while True:
-            item = await asyncio.wait_for(queue.get(), timeout=settings.SSE_QUEUE_TIMEOUT)
-            if item is None:
-                break
+        async for item in sse_queue_consume(queue, task, settings.SSE_QUEUE_TIMEOUT):
             yield item
-
-        await task
 
     return create_sse_response(event_stream())
 

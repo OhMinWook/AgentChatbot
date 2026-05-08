@@ -8,7 +8,7 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 from app.services.utils.memory_service import memory_service
 from app.services.utils.file_utils import save_upload_file
-from app.services.utils.sse_utils import create_sse_data, create_sse_response, stream_and_collect_answer, SSEType
+from app.services.utils.sse_utils import create_sse_data, create_sse_response, stream_and_collect_answer, SSEType, sse_queue_consume
 from app.services.rag.rag_ingestion_service import rag_ingestion_service
 from app.services.chat_agent.sse_adapter import sse_graph_adapter
 from app.services.chat_agent.guardrails_impl import chat_guardrails
@@ -84,20 +84,8 @@ async def upload_document(
             # 태스크 시작
             task = asyncio.create_task(run_ingestion())
 
-            # 큐 소비 및 스트리밍
-            while True:
-                try:
-                    data = await asyncio.wait_for(queue.get(), timeout=settings.SSE_QUEUE_TIMEOUT)
-                except asyncio.TimeoutError:
-                    yield create_sse_data({"type": SSEType.ERROR, "detail": "처리 시간이 초과되었습니다."})
-                    task.cancel()
-                    return
-                if data is None:
-                    break
-                yield data
-
-            # 태스크 완료 대기 및 예외 전파
-            await task
+            async for item in sse_queue_consume(queue, task, settings.SSE_QUEUE_TIMEOUT):
+                yield item
 
         return create_sse_response(stream_progress())
 
@@ -263,18 +251,11 @@ async def summarize_document(
 
         task = asyncio.create_task(run())
 
-        while True:
-            try:
-                item = await asyncio.wait_for(queue.get(), timeout=settings.SSE_QUEUE_TIMEOUT)
-            except asyncio.TimeoutError:
-                yield create_sse_data({"type": SSEType.ERROR, "detail": "처리 시간이 초과되었습니다."})
-                task.cancel()
-                return
-            if item is None:
-                break
+        async for item in sse_queue_consume(queue, task, settings.SSE_QUEUE_TIMEOUT):
             yield item
 
-        await task
+        if task.cancelled():
+            return
 
         if result_holder["error"]:
             yield create_sse_data({"type": SSEType.ERROR, "detail": result_holder["error"]})

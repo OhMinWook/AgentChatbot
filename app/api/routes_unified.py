@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Form
 
 from app.services.utils.memory_service import memory_service
-from app.services.utils.sse_utils import create_sse_response, SSEType
+from app.services.utils.sse_utils import create_sse_response, stream_and_collect_answer
 from app.services.chat_agent.guardrails_impl import chat_guardrails
 from app.services.router_agent import router_agent
 
@@ -19,28 +19,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-
-async def _stream_response(generator, invoke_id: str, user_message: str):
-    """SSE 스트리밍 및 히스토리 저장 헬퍼"""
-    full_answer = ""
-
-    async for chunk in generator:
-        yield chunk
-
-        try:
-            chunk_str = chunk.decode("utf-8").strip()
-            if chunk_str.startswith("data:"):
-                json_str = chunk_str[5:].strip()
-                if json_str:
-                    data = json.loads(json_str)
-                    if data.get("type") == SSEType.ANSWER:
-                        full_answer += data.get("content", "")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-
-    if full_answer:
-        await memory_service.add_history(invoke_id, user_message, full_answer)
-        logger.info(f"[Unified History Saved] invokeId: {invoke_id}")
 
 
 @router.post("/message/{invokeId}", summary="통합 챗봇 (문서 검색 + 장애 이력 DB)")
@@ -67,7 +45,7 @@ async def send_unified_message(
             target_filename=target_filename,
             translate_to=translate_to,
         )
-        return create_sse_response(_stream_response(generator, invokeId, guard.text))
+        return create_sse_response(stream_and_collect_answer(generator, invokeId, guard.text, "Unified History"))
 
     except HTTPException:
         raise

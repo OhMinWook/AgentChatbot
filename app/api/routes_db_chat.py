@@ -9,7 +9,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Form
 
 from app.services.utils.memory_service import memory_service
-from app.services.utils.sse_utils import create_sse_response, SSEType
+from app.services.utils.sse_utils import create_sse_response, stream_and_collect_answer
 from app.services.chat_agent.guardrails_impl import chat_guardrails
 from app.services.db_agent.sse_adapter import db_sse_adapter
 
@@ -17,28 +17,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-
-async def _stream_db_response(generator, invoke_id: str, user_message: str):
-    """SSE 스트리밍 및 히스토리 저장 헬퍼"""
-    full_answer = ""
-
-    async for chunk in generator:
-        yield chunk
-
-        try:
-            chunk_str = chunk.decode("utf-8").strip()
-            if chunk_str.startswith("data:"):
-                json_str = chunk_str[5:].strip()
-                if json_str:
-                    data = json.loads(json_str)
-                    if data.get("type") == SSEType.ANSWER:
-                        full_answer += data.get("content", "")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-
-    if full_answer:
-        await memory_service.add_history(invoke_id, user_message, full_answer)
-        logger.info(f"[DB History Saved] invokeId: {invoke_id}")
 
 
 @router.post("/message/db/{invokeId}", summary="장애 원인 분석 DB 챗봇 (SSE)")
@@ -62,7 +40,7 @@ async def send_db_message(
             user_query=guard.text,
             db_results=db_results,
         )
-        return create_sse_response(_stream_db_response(generator, invokeId, guard.text))
+        return create_sse_response(stream_and_collect_answer(generator, invokeId, guard.text, "DB History"))
 
     except HTTPException:
         raise

@@ -1,8 +1,11 @@
 """SSE (Server-Sent Events) 관련 공통 유틸리티"""
 import json
+import logging
 from enum import Enum
-from typing import Dict
+from typing import AsyncGenerator, Dict
 from fastapi.responses import StreamingResponse
+
+logger = logging.getLogger(__name__)
 
 
 class SSEType(str, Enum):
@@ -36,6 +39,42 @@ SSE_HEADERS: Dict[str, str] = {
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no"  # nginx 버퍼링 비활성화
 }
+
+
+async def stream_and_collect_answer(
+    generator,
+    invoke_id: str,
+    user_message: str,
+    log_label: str = "History",
+) -> AsyncGenerator[bytes, None]:
+    """SSE 청크를 yield하면서 answer 내용을 누적해 히스토리에 저장한다.
+
+    Args:
+        generator: SSE bytes를 yield하는 async generator
+        invoke_id: 세션 ID
+        user_message: 사용자 질문 (히스토리 저장용)
+        log_label: 로그 접두어 (예: "History (Open)", "DB History")
+    """
+    from app.services.utils.memory_service import memory_service  # 순환 import 방지
+
+    full_answer = ""
+
+    async for chunk in generator:
+        yield chunk
+        try:
+            chunk_str = chunk.decode("utf-8").strip()
+            if chunk_str.startswith("data:"):
+                json_str = chunk_str[5:].strip()
+                if json_str:
+                    data = json.loads(json_str)
+                    if data.get("type") == SSEType.ANSWER:
+                        full_answer += data.get("content", "")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
+    if full_answer:
+        await memory_service.add_history(invoke_id, user_message, full_answer)
+        logger.info(f"[{log_label} Saved] invokeId: {invoke_id}")
 
 
 def create_sse_response(generator, headers: Dict[str, str] = None) -> StreamingResponse:

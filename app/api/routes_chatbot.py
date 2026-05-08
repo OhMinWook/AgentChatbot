@@ -9,7 +9,7 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 from app.services.utils.memory_service import memory_service
 from app.services.utils.file_utils import save_upload_file
-from app.services.utils.sse_utils import create_sse_data, create_sse_response, SSEType
+from app.services.utils.sse_utils import create_sse_data, create_sse_response, stream_and_collect_answer, SSEType
 from app.services.rag.rag_ingestion_service import rag_ingestion_service
 from app.services.chat_agent.sse_adapter import sse_graph_adapter
 from app.services.chat_agent.guardrails_impl import chat_guardrails
@@ -20,36 +20,6 @@ from app.services.rag.qdrant_service import qdrant_service
 
 router = APIRouter()
 
-
-async def _stream_chat_response(
-    generator,
-    invoke_id: str,
-    trigger_message: str,
-    history_label: str = ""
-):
-    """공통 SSE 스트리밍 및 히스토리 저장 헬퍼"""
-    full_answer = ""
-
-    async for chunk in generator:
-        yield chunk
-
-        # 답변 청크 누적 (히스토리 저장용)
-        try:
-            chunk_str = chunk.decode('utf-8').strip()
-            if chunk_str.startswith("data:"):
-                json_str = chunk_str[5:].strip()
-                if json_str:
-                    data = json.loads(json_str)
-                    if data.get("type") == "answer":
-                        full_answer += data.get("content", "")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-
-    # 히스토리 저장 (답변이 있는 경우만)
-    if full_answer:
-        await memory_service.add_history(invoke_id, trigger_message, full_answer)
-        label = f" ({history_label})" if history_label else ""
-        logger.info(f"[History Saved] invokeId: {invoke_id}{label}")
 
 
 @router.post("/upload/{invokeId}", summary="문서 업로드 및 인덱싱 (SSE)")
@@ -160,7 +130,7 @@ async def send_private_message(
             raise HTTPException(status_code=400, detail=guard.reason)
 
         generator = sse_graph_adapter.invoke_with_sse(invokeId, guard.text, filter_filename=target_filename, translate_to=translate_to)
-        return create_sse_response(_stream_chat_response(generator, invokeId, guard.text, "Private"))
+        return create_sse_response(stream_and_collect_answer(generator, invokeId, guard.text, "History (Private)"))
 
     except HTTPException:
         raise
@@ -186,7 +156,7 @@ async def send_open_message(
             raise HTTPException(status_code=400, detail=guard.reason)
 
         generator = sse_graph_adapter.invoke_with_sse(invokeId, guard.text, filter_filename=None, translate_to=translate_to)
-        return create_sse_response(_stream_chat_response(generator, invokeId, guard.text, "Open"))
+        return create_sse_response(stream_and_collect_answer(generator, invokeId, guard.text, "History (Open)"))
 
     except HTTPException:
         raise

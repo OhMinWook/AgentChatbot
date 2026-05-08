@@ -15,11 +15,12 @@ from app.services.agent_base.correction import (
     CorrectionContext,
     VerifyResult,
 )
+from app.core.config import settings
+from app.services.api_clients.llm_utils import strip_markdown_codeblock
 from app.services.chat_agent.node_utils import (
     VERIFY_ANSWER_JSON_SCHEMA,
     call_llm,
     classify_question,
-    strip_markdown_codeblock,
 )
 from app.services.chat_agent.prompts import get_verify_prompt
 
@@ -48,7 +49,7 @@ class HallucinationVerifier(BaseVerifier):
                     answer=answer,
                 )},
             ],
-            max_tokens=256,
+            max_tokens=settings.VERIFY_MAX_TOKENS,
             json_schema=VERIFY_ANSWER_JSON_SCHEMA,
         )
 

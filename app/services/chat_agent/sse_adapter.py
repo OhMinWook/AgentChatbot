@@ -23,8 +23,7 @@ from app.services.utils.sse_utils import SSEType
 
 logger = logging.getLogger(__name__)
 
-# precomputed 답변을 작은 청크로 나눌 때 사용할 크기
-_CHUNK_SIZE = 6
+# precomputed 답변을 작은 청크로 나눌 때 사용할 크기 (settings.SSEsettings.SSE_CHUNK_SIZE)
 
 _TRANSLATE_LANG_MAP = {
     "en": "English",
@@ -76,13 +75,13 @@ class SSEGraphAdapter:
                 korean, _, translation = content.partition(DELIMITER)
                 korean = korean.strip()
                 translation = translation.strip()
-                for i in range(0, len(korean), _CHUNK_SIZE):
-                    yield self._format_sse({"type": SSEType.ANSWER, "content": korean[i:i + _CHUNK_SIZE]})
-                for i in range(0, len(translation), _CHUNK_SIZE):
-                    yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": translation[i:i + _CHUNK_SIZE]})
+                for i in range(0, len(korean), settings.SSE_CHUNK_SIZE):
+                    yield self._format_sse({"type": SSEType.ANSWER, "content": korean[i:i + settings.SSE_CHUNK_SIZE]})
+                for i in range(0, len(translation), settings.SSE_CHUNK_SIZE):
+                    yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": translation[i:i + settings.SSE_CHUNK_SIZE]})
             else:
-                for i in range(0, len(content), _CHUNK_SIZE):
-                    yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
+                for i in range(0, len(content), settings.SSE_CHUNK_SIZE):
+                    yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + settings.SSE_CHUNK_SIZE]})
         else:
             messages = streaming_payload.get("messages", [])
             max_tokens = streaming_payload.get("max_tokens", 2048)
@@ -307,13 +306,13 @@ class SSEGraphAdapter:
                     )
                 except Exception:
                     pass
-                for i in range(0, len(content), _CHUNK_SIZE):
-                    yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
+                for i in range(0, len(content), settings.SSE_CHUNK_SIZE):
+                    yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + settings.SSE_CHUNK_SIZE]})
                 if translate_to:
                     cached_translation = cached.get("translations", {}).get(translate_to)
                     if cached_translation:
-                        for i in range(0, len(cached_translation), _CHUNK_SIZE):
-                            yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": cached_translation[i:i + _CHUNK_SIZE]})
+                        for i in range(0, len(cached_translation), settings.SSE_CHUNK_SIZE):
+                            yield self._format_sse({"type": SSEType.TRANSLATION, "lang": translate_to, "content": cached_translation[i:i + settings.SSE_CHUNK_SIZE]})
                     else:
                         translation_buffer = []
                         async for chunk in self._stream_translation(content, translate_to):

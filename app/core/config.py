@@ -55,6 +55,16 @@ class Settings(BaseModel):
     HYDE_ENABLED: bool = os.getenv("HYDE_ENABLED", "true").lower() == "true"
     HYDE_MAX_TOKENS: int = int(os.getenv("HYDE_MAX_TOKENS", "256"))
 
+    # [할루시네이션 검증 설정]
+    MAX_VERIFY_RETRIES: int = int(os.getenv("MAX_VERIFY_RETRIES", "1"))
+    VERIFY_MAX_TOKENS: int = int(os.getenv("VERIFY_MAX_TOKENS", "256"))
+
+    # [SSE 스트리밍 설정]
+    SSE_CHUNK_SIZE: int = int(os.getenv("SSE_CHUNK_SIZE", "6"))
+
+    # [Guardrails 설정]
+    PROFANITY_INPUT_GUARD_ENABLED: bool = os.getenv("PROFANITY_INPUT_GUARD_ENABLED", "false").lower() == "true"
+
     # [Contextual Retrieval]
     CONTEXTUAL_RETRIEVAL_ENABLED: bool = os.getenv("CONTEXTUAL_RETRIEVAL_ENABLED", "false").lower() == "true"
     CONTEXTUAL_RETRIEVAL_MAX_DOC_CHARS: int = int(os.getenv("CONTEXTUAL_RETRIEVAL_MAX_DOC_CHARS", "8000"))

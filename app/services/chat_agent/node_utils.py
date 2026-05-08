@@ -33,8 +33,6 @@ VERIFY_ANSWER_JSON_SCHEMA = {
 
 # ── 할루시네이션 위험도 ────────────────────────────────────────────────────────
 
-MAX_VERIFY_RETRIES = 1
-
 _HIGH_RISK_QUESTION_PATTERN = re.compile(
     r"""
     몇|얼마|언제|기한|날짜|기간|기준|조건|요건|자격|대상  # 구체적 정보 요구
@@ -54,23 +52,7 @@ def is_high_risk_question(question: str) -> bool:
 
 # ── LLM 호출 헬퍼 ─────────────────────────────────────────────────────────────
 
-def strip_think_blocks(text: str) -> str:
-    """<think>...</think> 블록 제거 (닫힌 태그 없는 경우도 처리)"""
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
-    return text.strip()
-
-
-def strip_markdown_codeblock(text: str) -> str:
-    """```json ... ``` 마크다운 코드블록 제거"""
-    text = text.strip()
-    if text.startswith("```"):
-        first_newline = text.find("\n")
-        if first_newline != -1:
-            text = text[first_newline + 1:]
-        if text.endswith("```"):
-            text = text[:-3].strip()
-    return text
+from app.services.api_clients.llm_utils import strip_think_blocks, strip_markdown_codeblock  # noqa: E402
 
 
 @observe()

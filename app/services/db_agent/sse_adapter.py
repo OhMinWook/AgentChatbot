@@ -11,12 +11,11 @@ from typing import AsyncGenerator, Dict, Any, Optional
 from app.core.langfuse_client import observe  # langfuse 비활성화 스텁
 
 from app.services.db_agent.agent import db_main_agent
+from app.core.config import settings
 from app.services.api_clients.llm_utils import stream_llm_tokens
 from app.services.utils.sse_utils import SSEType
 
 logger = logging.getLogger(__name__)
-
-_CHUNK_SIZE = 6
 
 
 class DBSSEAdapter:
@@ -60,9 +59,9 @@ class DBSSEAdapter:
 
         if payload.get("precomputed"):
             content = self._normalize_markdown(payload.get("content", ""))
-            for i in range(0, len(content), _CHUNK_SIZE):
+            for i in range(0, len(content), settings.SSE_CHUNK_SIZE):
                 log_ttft()
-                yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + _CHUNK_SIZE]})
+                yield self._format_sse({"type": SSEType.ANSWER, "content": content[i:i + settings.SSE_CHUNK_SIZE]})
         else:
             messages = payload.get("messages", [])
             max_tokens = payload.get("max_tokens", 2048)

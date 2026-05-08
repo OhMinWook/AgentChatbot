@@ -12,6 +12,7 @@ OutputGuard:
 import logging
 from typing import Any, Dict
 
+from app.core.config import settings
 from app.services.agent_base.guardrails import (
     BaseInputGuard,
     BaseOutputGuard,
@@ -67,11 +68,12 @@ class ProfanityOutputGuard(BaseOutputGuard):
 
 # ── 파이프라인 싱글톤 ─────────────────────────────────────────────────────────
 
+_input_guards = [BlankInputGuard()]
+if settings.PROFANITY_INPUT_GUARD_ENABLED:
+    _input_guards.append(ProfanityInputGuard())
+
 chat_guardrails = GuardrailsPipeline(
-    input_guards=[
-        BlankInputGuard(),
-        # ProfanityInputGuard(),
-    ],
+    input_guards=_input_guards,
     output_guards=[
         ProfanityOutputGuard(),
     ],

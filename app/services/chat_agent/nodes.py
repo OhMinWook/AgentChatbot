@@ -18,11 +18,10 @@ from app.services.chat_agent.prompts import (
 )
 from app.services.chat_agent.node_utils import (
     VERIFY_ANSWER_JSON_SCHEMA,
-    MAX_VERIFY_RETRIES,
-    strip_markdown_codeblock,
     call_llm,
     generate_single_answer,
 )
+from app.services.api_clients.llm_utils import strip_markdown_codeblock
 from app.services.chat_agent.tools import create_search_tool
 from app.core.config import settings
 
@@ -196,8 +195,8 @@ async def verify_answer_node(state: MainState) -> Dict[str, Any]:
         logger.info("[Verify] 전체 답변 검증 통과")
         return {"verification_passed": True}
 
-    if retry_count < MAX_VERIFY_RETRIES:
-        logger.warning(f"[Verify] {len(failed)}개 실패 → 재시도 ({retry_count + 1}/{MAX_VERIFY_RETRIES})")
+    if retry_count < settings.MAX_VERIFY_RETRIES:
+        logger.warning(f"[Verify] {len(failed)}개 실패 → 재시도 ({retry_count + 1}/{settings.MAX_VERIFY_RETRIES})")
         return {
             "verification_passed": False,
             "retry_count": retry_count + 1,

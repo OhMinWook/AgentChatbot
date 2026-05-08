@@ -197,70 +197,50 @@ class AdminDocumentService:
         logger.info(f"[AdminDocument] Added {len(points)} chunks for key={key}")
         return True
 
-    async def _extract_chunks(self, file_path: str, file_name: str) -> List[Dict]:
-        """파일에서 청크 추출 (rag_ingestion_service 내부 로직 활용)"""
-        _, ext = os.path.splitext(file_name)
-        ext_lower = ext.lower()
-
-        chunks = []
-
+    async def _iter_pages(self, file_path: str, ext_lower: str) -> List[Tuple[int, str]]:
+        """파일 타입별 텍스트 추출 → (page_num, text) 리스트 반환"""
         if ext_lower == '.pdf':
-            # PDF 직접 처리
-            page_generator = await asyncio.to_thread(
+            return await asyncio.to_thread(
                 lambda: list(file_text_extractor.iter_pdf_pages(file_path))
             )
-
-            chunker = IncrementalChunker(
-                file_name=file_name,
-                chunk_size=settings.CHUNK_SIZE,
-                chunk_overlap=settings.CHUNK_OVERLAP,
-            )
-            for page_num, page_text in page_generator:
-                chunks.extend(chunker.add_page(page_num, page_text))
-            chunks.extend(chunker.flush())
-
         elif ext_lower in ['.hwp', '.hwpx']:
-            # HWP -> PDF 변환 후 처리
             temp_pdf_dir = tempfile.mkdtemp()
             try:
                 converted_pdf = await asyncio.to_thread(
-                    file_text_extractor.convert_hwp_to_pdf,
-                    file_path,
-                    temp_pdf_dir,
+                    file_text_extractor.convert_hwp_to_pdf, file_path, temp_pdf_dir
                 )
                 if converted_pdf and os.path.exists(converted_pdf):
-                    page_generator = await asyncio.to_thread(
+                    return await asyncio.to_thread(
                         lambda: list(file_text_extractor.iter_pdf_pages(converted_pdf))
                     )
-                    chunker = IncrementalChunker(
-                        file_name=file_name,
-                        chunk_size=settings.CHUNK_SIZE,
-                        chunk_overlap=settings.CHUNK_OVERLAP,
-                    )
-                    for page_num, page_text in page_generator:
-                        chunks.extend(chunker.add_page(page_num, page_text))
-                    chunks.extend(chunker.flush())
             finally:
                 shutil.rmtree(temp_pdf_dir, ignore_errors=True)
-
+            return []
         else:
-            # 기타 문서 (MarkItDown 사용)
             text_content = await asyncio.to_thread(file_text_extractor.convert_sync, file_path)
-            if text_content:
-                chunker = IncrementalChunker(
-                    file_name=file_name,
-                    chunk_size=settings.CHUNK_SIZE,
-                    chunk_overlap=settings.CHUNK_OVERLAP,
-                )
-                chunks = chunker.add_page(1, text_content)
-                chunks.extend(chunker.flush())
+            return [(1, text_content)] if text_content else []
 
-        # prev/next 청크 ID 연결
+    def _chunk_pages(self, pages: List[Tuple[int, str]], file_name: str) -> List[Dict]:
+        """(page_num, text) 리스트 → 청크 리스트 (prev/next 링크 포함)"""
+        chunker = IncrementalChunker(
+            file_name=file_name,
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
+        )
+        chunks = []
+        for page_num, page_text in pages:
+            chunks.extend(chunker.add_page(page_num, page_text))
+        chunks.extend(chunker.flush())
         for i, chunk in enumerate(chunks):
             chunk["metadata"]["prev_chunk_id"] = chunks[i - 1]["id"] if i > 0 else None
             chunk["metadata"]["next_chunk_id"] = chunks[i + 1]["id"] if i < len(chunks) - 1 else None
-
         return chunks
+
+    async def _extract_chunks(self, file_path: str, file_name: str) -> List[Dict]:
+        """파일에서 청크 추출"""
+        _, ext = os.path.splitext(file_name)
+        pages = await self._iter_pages(file_path, ext.lower())
+        return self._chunk_pages(pages, file_name)
 
     async def _check_key_exists(self, key: str) -> bool:
         """key 중복 체크"""
@@ -385,7 +365,7 @@ class AdminDocumentService:
                             ),
                         ],
                     ),
-                    limit=10000,
+                    limit=settings.QDRANT_SCROLL_BATCH_SIZE,
                     offset=offset,
                     with_payload=["key", "admin_id", "admin_name", "source", "file_size", "regist_date", "is_use"],
                     with_vectors=False,

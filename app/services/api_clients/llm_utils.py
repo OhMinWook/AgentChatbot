@@ -38,6 +38,15 @@ def strip_markdown_codeblock(text: str) -> str:
     return text
 
 
+def extract_json_object(text: str) -> Optional[str]:
+    """텍스트에서 첫 번째 JSON 객체({...}) 추출"""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        return text[start:end + 1]
+    return None
+
+
 @observe()
 async def call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json_schema: Optional[Dict] = None) -> str:
     """LLM 호출 헬퍼 — think 블록 자동 제거.
@@ -54,8 +63,7 @@ async def call_llm(messages: List[Dict[str, str]], max_tokens: int = 2048, json_
                 content = content[think_end + len("</think>"):].strip()
             else:
                 content = re.sub(r"<think>[^{]*", "", content, flags=re.DOTALL).strip()
-            match = re.search(r"\{.*\}", content, flags=re.DOTALL)
-            return match.group(0) if match else content
+            return extract_json_object(content) or content
         return strip_think_blocks(content)
     except Exception as e:
         logger.error(f"LLM call failed: {e}")

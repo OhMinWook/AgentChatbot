@@ -9,7 +9,7 @@ import zipfile
 from typing import Any, Dict, List, Optional
 from xml.etree import ElementTree as ET
 
-from app.services.api_clients.llm_utils import call_llm, strip_markdown_codeblock
+from app.services.api_clients.llm_utils import call_llm, strip_markdown_codeblock, extract_json_object
 from app.services.documents.meeting_minutes_prompts import MEETING_MINUTES_EXTRACTOR
 from app.core.config import settings
 
@@ -50,12 +50,10 @@ class MeetingMinutesService:
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError:
-            # JSON 블록만 뽑아서 재시도
-            start = cleaned.find("{")
-            end = cleaned.rfind("}")
-            if start != -1 and end > start:
+            extracted = extract_json_object(cleaned)
+            if extracted:
                 try:
-                    return json.loads(cleaned[start:end + 1])
+                    return json.loads(extracted)
                 except json.JSONDecodeError:
                     return None
             return None

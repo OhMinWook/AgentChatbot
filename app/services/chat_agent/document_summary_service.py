@@ -60,7 +60,7 @@ class DocumentSummaryService:
                     all_references.append(ref)
 
             if filtered_chunks:
-                context = "\n\n---\n\n".join([c.get("content", "") for c in filtered_chunks])
+                context = settings.CHUNK_SEPARATOR.join([c.get("content", "") for c in filtered_chunks])
                 payload = document_summary_prompt_builder.build_qa_payload(q["question"], context)
                 llm_tasks.append((q["key"], llm_client.chat_completions(payload)))
             else:
@@ -116,7 +116,7 @@ class DocumentSummaryService:
         if not filtered_chunks:
             return None, []
 
-        context = "\n\n---\n\n".join([c.get("content", "") for c in filtered_chunks])
+        context = settings.CHUNK_SEPARATOR.join([c.get("content", "") for c in filtered_chunks])
 
         if on_progress:
             await on_progress(50, "요약 생성 중...")

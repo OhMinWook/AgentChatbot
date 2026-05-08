@@ -101,6 +101,8 @@ class Settings(BaseModel):
     SSE_QUEUE_TIMEOUT: float = float(os.getenv("SSE_QUEUE_TIMEOUT", "600"))
 
     # [문서 처리]
+    CHUNK_SEPARATOR: str = "\n\n---\n\n"
+    QDRANT_SCROLL_BATCH_SIZE: int = int(os.getenv("QDRANT_SCROLL_BATCH_SIZE", "10000"))
     LARGE_DOC_CHUNK_THRESHOLD: int = int(os.getenv("LARGE_DOC_CHUNK_THRESHOLD", "100"))
     MAX_MEETING_ATTENDEES: int = int(os.getenv("MAX_MEETING_ATTENDEES", "8"))
     PDF_PROCESS_POOL_WORKERS: int = int(os.getenv("PDF_PROCESS_POOL_WORKERS", "8"))

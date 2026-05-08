@@ -13,6 +13,16 @@ logger = logging.getLogger(__name__)
 
 
 class STTClient(BaseAPIClient):
+    _MIME_TYPES = {
+        "wav": "audio/wav",
+        "mp3": "audio/mpeg",
+        "mp4": "audio/mp4",
+        "m4a": "audio/mp4",
+        "ogg": "audio/ogg",
+        "flac": "audio/flac",
+        "webm": "audio/webm",
+    }
+
     def __init__(self):
         super().__init__(
             base_url=settings.MODEL_SERVER_URL,
@@ -41,17 +51,8 @@ class STTClient(BaseAPIClient):
         :param filename: 파일명 (확장자 포함)
         :return: 변환된 텍스트
         """
-        _MIME_TYPES = {
-            "wav": "audio/wav",
-            "mp3": "audio/mpeg",
-            "mp4": "audio/mp4",
-            "m4a": "audio/mp4",
-            "ogg": "audio/ogg",
-            "flac": "audio/flac",
-            "webm": "audio/webm",
-        }
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "wav"
-        mime_type = _MIME_TYPES.get(ext, "audio/wav")
+        mime_type = self._MIME_TYPES.get(ext, "audio/wav")
 
         url = f"{self.base_url}/v1/audio/transcriptions"
         files = {"file": (filename, audio_bytes, mime_type)}

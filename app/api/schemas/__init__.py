@@ -7,7 +7,6 @@ from app.api.schemas.admin_schemas import (
     DocumentItem,
     DocumentListResponse,
     DocumentCountResponse,
-    DocumentAddRequest,
 )
 
 __all__ = [
@@ -15,5 +14,4 @@ __all__ = [
     "DocumentItem",
     "DocumentListResponse",
     "DocumentCountResponse",
-    "DocumentAddRequest",
 ]

@@ -40,8 +40,3 @@ class DocumentCountResponse(AdminBaseResponse):
     unUseCount: int = 0
 
 
-class DocumentAddRequest(BaseModel):
-    """문서 추가 요청 (Form data 검증용)"""
-    key: str
-    adminId: str
-    adminName: str

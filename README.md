@@ -5,19 +5,32 @@
 ## 주요 기능 (Key Features)
 
 *   **AI 챗봇 (Agentic RAG Chatbot)**
-    *   LangGraph 기반 에이전트가 질문 분석, 검색, 답변 생성을 자율적으로 수행
-    *   Human-in-the-loop: 질문이 불명확할 경우 사용자에게 명확화 요청 후 재개
+    *   LangGraph 기반 에이전트가 검색, 답변 생성, 할루시네이션 검증을 자율적으로 수행
+    *   할루시네이션 검증 (Hallucination Verification): 숫자·날짜·조건 포함 고위험 답변 자동 검증 및 재시도
     *   SSE(Server-Sent Events) 토큰 스트리밍으로 실시간 답변 전송
+    *   답변 캐시: 동일 질문에 대한 중복 LLM 호출 방지
 *   **하이브리드 RAG (Hybrid RAG)**
-    *   Dense + Sparse(BM25) 벡터 검색을 Weighted Sum 방식으로 결합
-    *   Qdrant 벡터 데이터베이스 기반
-    *   Reranker를 통한 최종 순위 재조정
+    *   Dense + Sparse(BM25) 벡터 검색을 RRF Fusion 방식으로 결합
+    *   Qdrant 벡터 데이터베이스 기반 (후보 64개 → Reranker 재순위)
+    *   인접 청크 컨텍스트 확장으로 검색 품질 향상
+    *   HyDE(Hypothetical Document Embedding): 가설적 답변으로 검색 쿼리 확장 (선택적 활성화)
+    *   Contextual Retrieval: 각 청크에 LLM 생성 맥락 접두어 추가 (선택적 활성화)
 *   **문서 처리 (Document Processing)**
-    *   PDF, HWP, Office 문서 업로드 및 자동 인덱싱
+    *   PDF, HWP/HWPX, Office 문서 업로드 및 자동 인덱싱
     *   Polaris / MarkItDown / pdf4llm 기반 문서 파싱
+    *   문서 유형(구조적/비구조적) 자동 감지 및 청킹 전략 분기
     *   Open Search (전체 문서) / Private Search (특정 파일) 모드 지원
-*   **통화 요약 (Call Summary)**: STT 결과물 분석 및 통화 내용 요약
-*   **문서 자동화 (Document Automation)**: Jinja2 기반 HWPX 문서 템플릿 자동 생성
+*   **Guardrails (입출력 보안)**
+    *   `BlankInputGuard`: 빈 메시지 차단
+    *   `ProfanityInputGuard`: 금칙어 입력 차단 (선택적 활성화)
+    *   `ProfanityOutputGuard`: 출력 금칙어 치환
+*   **통화 요약 (Call Summary)**: STT 결과물 분석 및 통화 내용 요약, ffmpeg 기반 오디오 전처리 (300~3400Hz 필터, 16kHz, 모노)
+*   **문서 자동화 (Document Automation)**
+    *   Jinja2 기반 HWPX 문서 템플릿 자동 생성 (기안문, 공문, 회의록)
+    *   회의 원문 텍스트/파일 → LLM 구조화 → 회의록 HWPX 자동 생성 (SSE 진행률)
+    *   토큰 기반 임시 다운로드 링크 (만료시간/1회용 설정 지원)
+*   **장애 이력 DB 챗봇 (DB Agent)**: MariaDB 장애 이력 조회 기반 원인 분석 답변
+*   **통합 챗봇 (Unified Chat)**: 문서 업로드 여부에 따라 RAG 챗봇 또는 DB 에이전트로 자동 라우팅
 *   **대화 변환 (Dialogue Converter)**: CSV 등 대화 로그 처리 및 변환
 
 ## 기술 스택 (Tech Stack)
@@ -29,6 +42,7 @@
 *   **Database**
     *   **Redis**: 대화 히스토리, 캐싱
     *   **Qdrant**: 벡터 DB (Dense + Sparse 하이브리드 검색)
+    *   **MariaDB**: 장애 이력 DB (DB 에이전트용)
 *   **Document**: MarkItDown, pdf4llm, Polaris
 *   **Infrastructure**: Docker
 
@@ -51,12 +65,16 @@
 │  │ chatbot.py  │  │ callsummary  │  │ automation.py          │ │
 │  └──────┬──────┘  └──────────────┘  └────────────────────────┘ │
 │         │                                                       │
+│  ┌──────────────┐  ┌──────────────────────────────────────────┐ │
+│  │routes_db_    │  │          routes_unified.py               │ │
+│  │chat.py       │  │  (RAG ↔ DB 자동 라우팅)                   │ │
+│  └──────────────┘  └──────────────────────────────────────────┘ │
+│         │                                                       │
 │         ▼                                                       │
 │  ┌─────────────────────────────────────────────┐                │
 │  │         SSEGraphAdapter (sse_adapter.py)     │                │
 │  │  - 그래프 실행 → SSE 이벤트 변환             │                │
 │  │  - 토큰 스트리밍 (vLLM SSE → Client SSE)    │                │
-│  │  - Human-in-the-loop 세션 관리               │                │
 │  └──────┬──────────────────────────┬────────────┘                │
 │         │ graph.astream()          │ stream_llm_tokens()        │
 │         ▼                          ▼                            │
@@ -83,49 +101,29 @@
 START
   │
   ▼
-┌──────────────────┐
-│  summarize_node  │  Redis에서 최근 대화 히스토리를 가져와 요약
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────────┐
-│ analyze_rewrite_node │  요약 + 현재 질문을 분석
-│                      │  → 질문이 명확한가? (is_clear)
-│                      │  → 서브질문으로 분해 (rewritten_questions)
-└────────┬─────────────┘
-         │
-         ├── is_clear=True ──────────────────────────┐
-         │                                           │
-         ▼                                           │
-┌──────────────────┐                                 │
-│ human_input_node │  interrupt_before로 그래프 정지  │
-│                  │  → SSE: clarification_needed 전송│
-│                  │  → 사용자 응답 대기               │
-└────────┬─────────┘                                 │
-         │                                           │
-         │ (사용자 응답 후 그래프 재개)                 │
-         │                                           │
-         ├───────────────────────────────────────────┘
-         │
-         ▼
-┌──────────────────────┐
-│ process_question_node│  서브질문별 하이브리드 검색 + 답변 생성
-│                      │
+┌────────────────────────┐
+│  process_question_node │  서브질문별 하이브리드 검색 + 답변 생성
+│                        │
 │  ┌─ Qdrant 하이브리드 검색 ─┐
 │  │  Dense + Sparse(BM25)    │
-│  │  Weighted Sum 결합       │
-│  │  Reranker 재순위         │
+│  │  RRF Fusion 결합          │
+│  │  Reranker 재순위          │
+│  │  인접 청크 컨텍스트 확장   │
 │  └──────────────────────────┘
-└────────┬─────────────┘
+└────────┬───────────────┘
          │
          ▼
-┌──────────────────┐
-│  aggregate_node  │  답변 통합 + streaming_payload 준비
-│                  │  → SSE adapter가 vLLM 스트리밍으로 전송
-└────────┬─────────┘
+┌────────────────────────┐
+│  verify_answer_node    │  할루시네이션 검증 (고위험 질문만)
+│                        │  숫자·날짜·조건 포함 답변 LLM 검증
+└────────┬───────────────┘
          │
-         ▼
-        END
+         ├── passed=true  ─────────────────── END
+         │
+         ├── passed=false + retry 가능 ──→ process_question_node
+         │                                  (AGENT_STRICT 프롬프트)
+         │
+         └── passed=false + 재시도 초과 ─── END (원본 답변 사용)
 ```
 
 ### 문서 인제스트 파이프라인
@@ -139,10 +137,14 @@ START
 │                        │
 │  확장자 판별            │
 │  ├─ .pdf → Polaris 또는 pdf4llm으로 마크다운 변환
-│  ├─ .hwp → PDF 변환 후 처리
+│  ├─ .hwp/.hwpx → Polaris 처리
 │  └─ 기타 → MarkItDown으로 마크다운 변환
 │                        │
-│  청크 분할 (CHUNK_SIZE=1000, OVERLAP=200)
+│  문서 유형 자동 감지    │
+│  ├─ structured   → 규칙 기반 청킹
+│  └─ unstructured → 시맨틱 청킹
+│                        │
+│  청크 분할 (CHUNK_SIZE=700, OVERLAP=150)
 │  Dense 임베딩 + Sparse(BM25) 벡터 생성
 │  Qdrant에 저장
 └────────────────────────┘
@@ -193,11 +195,25 @@ docker run -d \
 
 | 변수 | 설명 | 기본값 |
 |------|------|--------|
-| `MODEL_SERVER_URL` | LLM/임베딩/Reranker 서버 | `http://localhost:21440` |
-| `VLLM_MODEL` | 사용 모델 이름 | `LGAI-EXAONE/EXAONE-4.0-32B-AWQ` |
+| `MODEL_SERVER_URL` | LLM/임베딩/Reranker 서버 URL | - |
+| `VLLM_MODEL` | 사용 모델 이름 | - |
 | `REDIS_HOST` / `REDIS_PORT` | Redis 연결 | `localhost:6379` |
 | `QDRANT_HOST` / `QDRANT_PORT` | Qdrant 연결 | `localhost:6333` |
 | `QDRANT_COLLECTION` | Qdrant 컬렉션 이름 | `documents` |
+| `DB_HOST` / `DB_PORT` / `DB_NAME` | MariaDB 연결 (DB 에이전트용) | - |
+| `DB_USER` / `DB_PASSWORD` | MariaDB 인증 | - |
+| `RERANK_SCORE_THRESHOLD` | Reranker 최소 점수 | `0.45` |
+| `RERANK_MIN_RESULTS` | Reranker 최소 결과 수 | `2` |
+| `HYDE_ENABLED` | HyDE 활성화 여부 | `false` |
+| `CONTEXTUAL_RETRIEVAL_ENABLED` | Contextual Retrieval 활성화 | `false` |
+| `PROFANITY_INPUT_GUARD_ENABLED` | 금칙어 입력 가드 활성화 | `false` |
+| `ANSWER_CACHE_ENABLED` | 답변 캐시 활성화 | `true` |
+| `ANSWER_CACHE_TTL` | 답변 캐시 유효 시간 (초) | `3600` |
+| `MAX_VERIFY_RETRIES` | 할루시네이션 검증 재시도 횟수 | `1` |
+| `SSE_CHUNK_SIZE` | SSE 토큰 스트리밍 청크 크기 | `6` |
+| `FFMPEG_PATH` | ffmpeg 실행 경로 (통화 요약용) | `ffmpeg` |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | Langfuse 트레이싱 | - |
+| `LANGFUSE_HOST` | Langfuse 서버 URL | `http://localhost:3000` |
 
 ### 로컬 개발 환경
 
@@ -211,17 +227,41 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
+## 주요 엔드포인트 (API Endpoints)
+
+| 엔드포인트 | 메서드 | 설명 |
+|---|---|---|
+| `/message/open/{invokeId}` | POST | Open 챗봇 (전체 문서 검색, SSE) |
+| `/message/private/{invokeId}` | POST | Private 챗봇 (특정 파일 검색, SSE) |
+| `/message/{invokeId}/continue` | POST | Human-in-the-loop 재개 |
+| `/message/document-summary/{invokeId}` | POST | 문서 요약 (SSE 진행률) |
+| `/message/db/{invokeId}` | POST | 장애 이력 DB 챗봇 (SSE) |
+| `/message/{invokeId}` | POST | 통합 챗봇 (RAG ↔ DB 자동 라우팅, SSE) |
+| `/upload/{invokeId}` | POST | 문서 업로드 및 Qdrant 인덱싱 |
+| `/files/{invokeId}` | GET | 업로드 파일 목록 |
+| `/history/{invokeId}` | GET | RAG 챗봇 대화 이력 |
+| `/history/db/{invokeId}` | GET | DB 챗봇 대화 이력 |
+| `/documents/generate-hwpx` | POST | HWPX 문서 자동 생성 |
+| `/documents/meeting-minutes/generate-from-text` | POST | 회의 원문 → 회의록 HWPX (SSE) |
+| `/documents/download/{token}` | GET | 토큰 기반 파일 다운로드 |
+| `/call-summary/{invokeId}` | POST | 통화 요약 (오디오 파일, SSE) |
+| `/call-summary-sync/{invokeId}` | POST | 통화 요약 동기 (JSON 응답) |
+| `/admin/...` | POST/GET | 관리자 API (문서 관리, 금칙어 등) |
+
 ## 프로젝트 구조 (Project Structure)
 
 ```
 ├── app/
 │   ├── main.py                    # FastAPI 엔트리포인트
 │   ├── api/                       # API 라우트
-│   │   ├── routes_chatbot.py              # 챗봇 (Open/Private/Continue)
+│   │   ├── routes_chatbot.py              # RAG 챗봇 (Open/Private/Continue/Summary)
+│   │   ├── routes_db_chat.py              # 장애 이력 DB 챗봇
+│   │   ├── routes_unified.py              # 통합 챗봇 (RAG ↔ DB 자동 라우팅)
 │   │   ├── routes_callsummary.py          # 통화 요약
 │   │   ├── routes_dialogue_converter.py   # 대화 변환
-│   │   ├── routes_document_automation.py  # 문서 자동화
+│   │   ├── routes_document_automation.py  # 문서 자동화 (HWPX, 회의록)
 │   │   ├── routes_admin.py                # 관리자 API
+│   │   ├── routes_health.py               # 헬스 체크
 │   │   └── schemas/                       # Pydantic 스키마
 │   ├── core/                      # 설정
 │   │   └── config.py
@@ -231,22 +271,28 @@ uvicorn app.main:app --reload
 │       │   ├── stt_client.py              # STT 서버
 │       │   ├── model_server_client.py     # 임베딩/Reranker 서버
 │       │   └── polaris_client.py          # Polaris 문서 파싱
-│       ├── chat_agent/            # LangGraph 에이전트
+│       ├── chat_agent/            # LangGraph RAG 에이전트
 │       │   ├── graph.py               # 그래프 정의
 │       │   ├── graph_state.py         # 상태 클래스
 │       │   ├── nodes.py               # 노드 함수
 │       │   ├── edges.py               # 조건부 엣지
 │       │   ├── prompts.py             # 프롬프트 템플릿
-│       │   ├── tools.py               # 검색 도구
-│       │   └── sse_adapter.py         # SSE 스트리밍 어댑터
+│       │   ├── tools.py               # 하이브리드 검색 도구
+│       │   ├── sse_adapter.py         # SSE 스트리밍 어댑터
+│       │   └── guardrails_impl.py     # Guardrails (입출력 보안)
+│       ├── db_agent/              # DB 에이전트
+│       ├── router_agent/          # 통합 라우팅 에이전트
 │       ├── rag/                   # RAG 서비스
 │       │   ├── qdrant_service.py          # Qdrant 하이브리드 검색
 │       │   ├── rag_ingestion_service.py   # 문서 인제스트
+│       │   ├── chunker.py                 # 청킹 전략 (구조적/비구조적)
 │       │   └── sparse_encoder.py          # BM25 Sparse 인코더
 │       ├── admin/                 # 관리자 서비스
-│       ├── documents/             # 문서 자동화
+│       ├── documents/             # 문서 자동화 (HWPX, 회의록)
 │       ├── prompt_builders/       # 프롬프트 빌더
 │       └── utils/                 # 유틸리티
+│           ├── download_service.py        # 토큰 기반 다운로드 링크
+│           └── memory_service.py          # Redis 대화 히스토리
 ├── uploaded_files/                # 사용자 업로드 파일
 ├── requirements.txt
 ├── Dockerfile

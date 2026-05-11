@@ -15,3 +15,4 @@ eval/
 .env
 test_ui.html
 .claude/skills/
+.claude/settings.local.json

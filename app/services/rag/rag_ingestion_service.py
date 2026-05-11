@@ -183,6 +183,9 @@ class RagIngestionService:
         if on_progress:
             await on_progress(0, "파일 처리 시작")
 
+        # 0. 동일 파일 기존 청크 삭제 (재업로드 시 구버전 제거)
+        await qdrant_service.delete_by_source(invoke_id, file_name)
+
         # 1. 파일 타입 결정
         file_type = self._detect_file_type(file_name)
 
